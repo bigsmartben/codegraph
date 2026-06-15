@@ -1,5 +1,7 @@
 import { defineConfig } from 'vitest/config';
 
+const wasmRuntimeFlags = ['--liftoff-only'];
+
 export default defineConfig({
   test: {
     globals: true,
@@ -19,6 +21,10 @@ export default defineConfig({
      * there, so the variable is a no-op.
      */
     env: { CODEGRAPH_ALLOW_UNSAFE_NODE: '1' },
+    poolOptions: {
+      forks: { execArgv: wasmRuntimeFlags },
+      threads: { execArgv: wasmRuntimeFlags },
+    },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

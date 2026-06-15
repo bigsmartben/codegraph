@@ -1206,13 +1206,25 @@ function printFileTree(
 /**
  * codegraph serve
  */
+function parseHttpPort(raw: string | undefined): number {
+  if (raw === undefined || raw === '') return 3000;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error(`Invalid HTTP port: ${raw}`);
+  }
+  return port;
+}
+
 program
   .command('serve')
   .description('Start CodeGraph as an MCP server for AI assistants')
   .option('-p, --path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
-  .option('--mcp', 'Run as MCP server (stdio transport)')
+  .option('--mcp', 'Run as MCP server')
+  .option('--http', 'Run MCP server over Streamable HTTP instead of stdio')
+  .option('--host <host>', 'Host for HTTP MCP mode (default: 127.0.0.1)')
+  .option('--port <port>', 'Port for HTTP MCP mode (default: 3000, use 0 for a random free port)')
   .option('--no-watch', 'Disable the file watcher (no auto-sync; useful on slow filesystems like WSL2 /mnt drives)')
-  .action(async (options: { path?: string; mcp?: boolean; watch?: boolean }) => {
+  .action(async (options: { path?: string; mcp?: boolean; http?: boolean; host?: string; port?: string; watch?: boolean }) => {
     const projectPath = options.path ? resolveProjectPath(options.path) : undefined;
 
     // Commander sets watch=false when --no-watch is passed. Route it through
@@ -1223,11 +1235,25 @@ program
 
     try {
       if (options.mcp) {
-        // Start MCP server - it handles initialization lazily based on rootUri from client
-        const { MCPServer } = await import('../mcp/index');
-        const server = new MCPServer(projectPath);
-        await server.start();
-        // Server will run until terminated
+        if (options.http) {
+          const parsedPort = parseHttpPort(options.port);
+          const { MCPHttpServer } = await import('../mcp/http-server');
+          const server = new MCPHttpServer({
+            projectPath,
+            host: options.host,
+            port: parsedPort,
+          });
+          const url = await server.start();
+          process.stderr.write(`CodeGraph MCP HTTP server listening on ${url}\n`);
+          process.on('SIGINT', () => server.stop());
+          process.on('SIGTERM', () => server.stop());
+        } else {
+          // Start MCP server - it handles initialization lazily based on rootUri from client
+          const { MCPServer } = await import('../mcp/index');
+          const server = new MCPServer(projectPath);
+          await server.start();
+          // Server will run until terminated
+        }
       } else {
         // Default: show info about MCP mode.
         // Use stderr so stdout stays clean for any piped/stdio usage.

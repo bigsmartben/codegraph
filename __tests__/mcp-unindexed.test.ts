@@ -17,11 +17,12 @@ import * as path from 'path';
 import * as os from 'os';
 import { CodeGraph } from '../src';
 import { ToolHandler } from '../src/mcp/tools';
+import { WASM_RUNTIME_FLAGS } from '../src/extraction/wasm-runtime-flags';
 
 const BIN = path.resolve(__dirname, '../dist/bin/codegraph.js');
 
 function spawnServer(cwd: string): ChildProcessWithoutNullStreams {
-  return spawn(process.execPath, [BIN, 'serve', '--mcp'], {
+  return spawn(process.execPath, [...WASM_RUNTIME_FLAGS, BIN, 'serve', '--mcp'], {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
     // Direct (in-process) mode — the unindexed path never has a daemon
@@ -29,6 +30,23 @@ function spawnServer(cwd: string): ChildProcessWithoutNullStreams {
     // suite from leaking a detached daemon in the indexed test.
     env: { ...process.env, CODEGRAPH_NO_DAEMON: '1' },
   }) as ChildProcessWithoutNullStreams;
+}
+
+function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+  return new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+    }, 1000);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.kill('SIGTERM');
+  });
 }
 
 /** Send a JSON-RPC request and resolve with the response matching its id. */
@@ -85,9 +103,9 @@ describe('Unindexed-workspace session policy', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-unindexed-'));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (child) {
-      child.kill('SIGKILL');
+      await stopChild(child);
       child = null;
     }
     fs.rmSync(tempDir, { recursive: true, force: true });
