@@ -27,6 +27,10 @@ const (
 	RepositoryGenerationAnnotation = "codegraph.dev/repository-generation"
 )
 
+const (
+	defaultTerminationGracePeriodSeconds = int64(30)
+)
+
 func BuildPVC(repo *codegraphv1alpha1.CodeGraphRepository) *corev1.PersistentVolumeClaim {
 	names := NamesFor(repo)
 	storage := repo.Spec.Storage.Size
@@ -85,11 +89,12 @@ func BuildDeployment(repo *codegraphv1alpha1.CodeGraphRepository, defaultImage s
 	podLabels[WorkloadLabel] = WorkloadRuntime
 
 	podSpec := podSpecFor(repo, []corev1.Container{{
-		Name:      "codegraph",
-		Image:     repo.RuntimeImage(defaultImage),
-		Command:   []string{"codegraph"},
-		Args:      []string{"serve", "--mcp", "--http", "--host", "0.0.0.0", "--port", "3000", "--path", RepoPath},
-		Resources: repo.Spec.Resources,
+		Name:            "codegraph",
+		Image:           repo.RuntimeImage(defaultImage),
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command:         []string{"codegraph"},
+		Args:            []string{"serve", "--mcp", "--http", "--host", "0.0.0.0", "--port", "3000", "--path", RepoPath},
+		Resources:       repo.Spec.Resources,
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          MCPPortName,
@@ -102,8 +107,14 @@ func BuildDeployment(repo *codegraphv1alpha1.CodeGraphRepository, defaultImage s
 					Port: intstr.FromString(MCPPortName),
 				},
 			},
+			FailureThreshold: 3,
+			PeriodSeconds:    10,
+			SuccessThreshold: 1,
+			TimeoutSeconds:   1,
 		},
-		VolumeMounts: workspaceMounts(),
+		TerminationMessagePath:   corev1.TerminationMessagePathDefault,
+		TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+		VolumeMounts:             workspaceMounts(),
 	}})
 
 	return &appsv1.Deployment{
@@ -114,8 +125,17 @@ func BuildDeployment(repo *codegraphv1alpha1.CodeGraphRepository, defaultImage s
 			OwnerReferences: OwnerFor(repo),
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: int32Ptr(1),
-			Selector: &metav1.LabelSelector{MatchLabels: selector},
+			Replicas:                int32Ptr(1),
+			RevisionHistoryLimit:    int32Ptr(10),
+			ProgressDeadlineSeconds: int32Ptr(600),
+			Selector:                &metav1.LabelSelector{MatchLabels: selector},
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxUnavailable: intstrPtr(intstr.FromString("25%")),
+					MaxSurge:       intstrPtr(intstr.FromString("25%")),
+				},
+			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: podLabels,
@@ -233,12 +253,15 @@ func podSpecFor(repo *codegraphv1alpha1.CodeGraphRepository, containers []corev1
 		Affinity:      repo.Spec.Affinity,
 		Volumes:       workspaceVolumes(NamesFor(repo).PVC),
 		RestartPolicy: corev1.RestartPolicyAlways,
+		DNSPolicy:     corev1.DNSClusterFirst,
+		SchedulerName: corev1.DefaultSchedulerName,
 		SecurityContext: &corev1.PodSecurityContext{
 			RunAsNonRoot: boolPtr(true),
 			RunAsUser:    int64Ptr(1000),
 			RunAsGroup:   int64Ptr(1000),
 			FSGroup:      int64Ptr(1000),
 		},
+		TerminationGracePeriodSeconds: int64Ptr(defaultTerminationGracePeriodSeconds),
 	}
 }
 
@@ -271,5 +294,9 @@ func int32Ptr(value int32) *int32 {
 }
 
 func int64Ptr(value int64) *int64 {
+	return &value
+}
+
+func intstrPtr(value intstr.IntOrString) *intstr.IntOrString {
 	return &value
 }

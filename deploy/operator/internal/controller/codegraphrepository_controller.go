@@ -11,6 +11,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -295,7 +296,11 @@ func (r *CodeGraphRepositoryReconciler) ensurePVC(ctx context.Context, repo *cod
 		return err
 	}
 
+	before := current.DeepCopyObject().(client.Object)
 	applyObjectMeta(&current, desired)
+	if apiequality.Semantic.DeepEqual(before, &current) {
+		return nil
+	}
 	return r.Update(ctx, &current)
 }
 
@@ -326,8 +331,12 @@ func (r *CodeGraphRepositoryReconciler) ensure(ctx context.Context, repo *codegr
 		return err
 	}
 
+	before := current.DeepCopyObject().(client.Object)
 	applyObjectMeta(current, desired)
 	applyObjectSpec(current, desired)
+	if apiequality.Semantic.DeepEqual(before, current) {
+		return nil
+	}
 	return r.Update(ctx, current)
 }
 

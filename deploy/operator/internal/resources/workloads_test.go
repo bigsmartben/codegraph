@@ -110,6 +110,15 @@ func TestBuildDeploymentRunsHTTPMCPServerWithOverrideImageAndPVC(t *testing.T) {
 	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
 		t.Fatalf("Replicas = %v", deployment.Spec.Replicas)
 	}
+	if deployment.Spec.RevisionHistoryLimit == nil || *deployment.Spec.RevisionHistoryLimit != 10 {
+		t.Fatalf("RevisionHistoryLimit = %v", deployment.Spec.RevisionHistoryLimit)
+	}
+	if deployment.Spec.ProgressDeadlineSeconds == nil || *deployment.Spec.ProgressDeadlineSeconds != 600 {
+		t.Fatalf("ProgressDeadlineSeconds = %v", deployment.Spec.ProgressDeadlineSeconds)
+	}
+	if deployment.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
+		t.Fatalf("Strategy.Type = %q", deployment.Spec.Strategy.Type)
+	}
 	if deployment.Spec.Template.Annotations["codegraph.dev/repository-generation"] != "1" {
 		t.Fatalf("pod annotations = %#v", deployment.Spec.Template.Annotations)
 	}
@@ -118,6 +127,15 @@ func TestBuildDeploymentRunsHTTPMCPServerWithOverrideImageAndPVC(t *testing.T) {
 	container := onlyContainer(t, podSpec.Containers)
 	if container.Image != "ghcr.io/acme/codegraph:repo" {
 		t.Fatalf("Image = %q", container.Image)
+	}
+	if container.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("ImagePullPolicy = %q", container.ImagePullPolicy)
+	}
+	if container.TerminationMessagePath != corev1.TerminationMessagePathDefault {
+		t.Fatalf("TerminationMessagePath = %q", container.TerminationMessagePath)
+	}
+	if container.TerminationMessagePolicy != corev1.TerminationMessageReadFile {
+		t.Fatalf("TerminationMessagePolicy = %q", container.TerminationMessagePolicy)
 	}
 	gotCommand := append(append([]string{}, container.Command...), container.Args...)
 	wantCommand := []string{"codegraph", "serve", "--mcp", "--http", "--host", "0.0.0.0", "--port", "3000", "--path", "/workspace/repo"}
@@ -132,6 +150,15 @@ func TestBuildDeploymentRunsHTTPMCPServerWithOverrideImageAndPVC(t *testing.T) {
 	}
 	if container.ReadinessProbe.TCPSocket.Port.StrVal != "mcp" {
 		t.Fatalf("readiness TCP port = %#v", container.ReadinessProbe.TCPSocket.Port)
+	}
+	if podSpec.DNSPolicy != corev1.DNSClusterFirst {
+		t.Fatalf("DNSPolicy = %q", podSpec.DNSPolicy)
+	}
+	if podSpec.SchedulerName != corev1.DefaultSchedulerName {
+		t.Fatalf("SchedulerName = %q", podSpec.SchedulerName)
+	}
+	if podSpec.TerminationGracePeriodSeconds == nil || *podSpec.TerminationGracePeriodSeconds != 30 {
+		t.Fatalf("TerminationGracePeriodSeconds = %v", podSpec.TerminationGracePeriodSeconds)
 	}
 	assertWorkspacePVCVolume(t, podSpec)
 	assertWorkspaceMount(t, container)
