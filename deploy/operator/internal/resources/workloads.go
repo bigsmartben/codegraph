@@ -1,6 +1,8 @@
 package resources
 
 import (
+	"strconv"
+
 	codegraphv1alpha1 "github.com/colbymchenry/codegraph/deploy/operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -19,6 +21,10 @@ const (
 
 	gitSSHVolume = "git-ssh"
 	gitSSHPath   = "/git-ssh"
+)
+
+const (
+	RepositoryGenerationAnnotation = "codegraph.dev/repository-generation"
 )
 
 func BuildPVC(repo *codegraphv1alpha1.CodeGraphRepository) *corev1.PersistentVolumeClaim {
@@ -59,7 +65,7 @@ func BuildService(repo *codegraphv1alpha1.CodeGraphRepository) *corev1.Service {
 		},
 		Spec: corev1.ServiceSpec{
 			Type:     corev1.ServiceTypeClusterIP,
-			Selector: SelectorFor(repo),
+			Selector: RuntimeSelectorFor(repo),
 			Ports: []corev1.ServicePort{
 				{
 					Name:       MCPPortName,
@@ -74,7 +80,9 @@ func BuildService(repo *codegraphv1alpha1.CodeGraphRepository) *corev1.Service {
 func BuildDeployment(repo *codegraphv1alpha1.CodeGraphRepository, defaultImage string) *appsv1.Deployment {
 	names := NamesFor(repo)
 	labels := LabelsFor(repo)
-	selector := SelectorFor(repo)
+	selector := RuntimeSelectorFor(repo)
+	podLabels := LabelsFor(repo)
+	podLabels[WorkloadLabel] = WorkloadRuntime
 
 	podSpec := podSpecFor(repo, []corev1.Container{{
 		Name:      "codegraph",
@@ -90,8 +98,7 @@ func BuildDeployment(repo *codegraphv1alpha1.CodeGraphRepository, defaultImage s
 		},
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/mcp",
+				TCPSocket: &corev1.TCPSocketAction{
 					Port: intstr.FromString(MCPPortName),
 				},
 			},
@@ -110,8 +117,13 @@ func BuildDeployment(repo *codegraphv1alpha1.CodeGraphRepository, defaultImage s
 			Replicas: int32Ptr(1),
 			Selector: &metav1.LabelSelector{MatchLabels: selector},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
-				Spec:       podSpec,
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: podLabels,
+					Annotations: map[string]string{
+						RepositoryGenerationAnnotation: strconv.FormatInt(repo.Generation, 10),
+					},
+				},
+				Spec: podSpec,
 			},
 		},
 	}
@@ -120,6 +132,8 @@ func BuildDeployment(repo *codegraphv1alpha1.CodeGraphRepository, defaultImage s
 func BuildSyncJob(repo *codegraphv1alpha1.CodeGraphRepository, defaultImage string) *batchv1.Job {
 	names := NamesFor(repo)
 	labels := LabelsFor(repo)
+	podLabels := LabelsFor(repo)
+	podLabels[WorkloadLabel] = WorkloadSync
 	container := corev1.Container{
 		Name:      "sync",
 		Image:     repo.RuntimeImage(defaultImage),
@@ -139,6 +153,7 @@ func BuildSyncJob(repo *codegraphv1alpha1.CodeGraphRepository, defaultImage stri
 		container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{
 			SecretRef: &corev1.SecretEnvSource{
 				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+				Optional:             boolPtr(true),
 			},
 		})
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
@@ -149,7 +164,10 @@ func BuildSyncJob(repo *codegraphv1alpha1.CodeGraphRepository, defaultImage stri
 		volumes = append(volumes, corev1.Volume{
 			Name: gitSSHVolume,
 			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{SecretName: secretName},
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: secretName,
+					Optional:   boolPtr(true),
+				},
 			},
 		})
 	}
@@ -168,7 +186,7 @@ func BuildSyncJob(repo *codegraphv1alpha1.CodeGraphRepository, defaultImage stri
 		Spec: batchv1.JobSpec{
 			BackoffLimit: int32Ptr(1),
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{Labels: podLabels},
 				Spec:       podSpec,
 			},
 		},
@@ -177,13 +195,34 @@ func BuildSyncJob(repo *codegraphv1alpha1.CodeGraphRepository, defaultImage stri
 
 func syncScript() string {
 	return `set -eu
-rm -rf /workspace/repo
-git clone "$GIT_URL" /workspace/repo
-git -C /workspace/repo checkout "$GIT_REF"
-cd /workspace/repo
+if [ -n "${GIT_USERNAME:-}" ] && [ -n "${GIT_PASSWORD:-}" ]; then
+  cat > /tmp/codegraph-git-askpass <<'EOF'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\n' "$GIT_USERNAME" ;;
+  *Password*) printf '%s\n' "$GIT_PASSWORD" ;;
+  *) printf '\n' ;;
+esac
+EOF
+  chmod 700 /tmp/codegraph-git-askpass
+  export GIT_ASKPASS=/tmp/codegraph-git-askpass
+fi
+if [ -f /git-ssh/ssh-privatekey ]; then
+  cp /git-ssh/ssh-privatekey /tmp/codegraph-ssh-key
+  chmod 600 /tmp/codegraph-ssh-key
+  export GIT_SSH_COMMAND="ssh -i /tmp/codegraph-ssh-key -o StrictHostKeyChecking=accept-new"
+fi
+rm -rf /workspace/repo-next
+rm -f /workspace/.resolved-ref-next
+git clone "$GIT_URL" /workspace/repo-next
+git -C /workspace/repo-next checkout "$GIT_REF"
+cd /workspace/repo-next
 codegraph init
-codegraph index
-git -C /workspace/repo rev-parse HEAD > /workspace/.resolved-ref`
+git -C /workspace/repo-next rev-parse HEAD > /workspace/.resolved-ref-next
+rm -rf /workspace/repo-previous
+if [ -d /workspace/repo ]; then mv /workspace/repo /workspace/repo-previous; fi
+mv /workspace/repo-next /workspace/repo
+mv /workspace/.resolved-ref-next /workspace/.resolved-ref`
 }
 
 func podSpecFor(repo *codegraphv1alpha1.CodeGraphRepository, containers []corev1.Container) corev1.PodSpec {

@@ -60,6 +60,9 @@ func TestBuildServiceUsesMCPPortAndRepoSelector(t *testing.T) {
 	if service.Spec.Selector["codegraph.dev/repo-id"] != "api-service" {
 		t.Fatalf("selector repo id = %q", service.Spec.Selector["codegraph.dev/repo-id"])
 	}
+	if service.Spec.Selector[WorkloadLabel] != WorkloadRuntime {
+		t.Fatalf("selector workload = %q", service.Spec.Selector[WorkloadLabel])
+	}
 	if len(service.Spec.Ports) != 1 {
 		t.Fatalf("len(ports) = %d", len(service.Spec.Ports))
 	}
@@ -70,7 +73,21 @@ func TestBuildServiceUsesMCPPortAndRepoSelector(t *testing.T) {
 	if port.Port != 3000 {
 		t.Fatalf("port = %d", port.Port)
 	}
+	if port.TargetPort.StrVal != "mcp" {
+		t.Fatalf("target port = %#v", port.TargetPort)
+	}
 	assertOwnedByRepository(t, service.OwnerReferences)
+}
+
+func TestBuildServiceSelectorExcludesSyncJobPods(t *testing.T) {
+	repo := workloadRepository()
+
+	service := BuildService(repo)
+	job := BuildSyncJob(repo, "ghcr.io/acme/codegraph:default")
+
+	if selectorMatchesLabels(service.Spec.Selector, job.Spec.Template.Labels) {
+		t.Fatalf("service selector %#v unexpectedly matches sync job pod labels %#v", service.Spec.Selector, job.Spec.Template.Labels)
+	}
 }
 
 func TestBuildDeploymentRunsHTTPMCPServerWithOverrideImageAndPVC(t *testing.T) {
@@ -84,8 +101,17 @@ func TestBuildDeploymentRunsHTTPMCPServerWithOverrideImageAndPVC(t *testing.T) {
 	}
 	assertOwnedByRepository(t, deployment.OwnerReferences)
 	assertDeploymentSelectorMatchesRepo(t, deployment)
+	if deployment.Spec.Selector.MatchLabels[WorkloadLabel] != WorkloadRuntime {
+		t.Fatalf("selector workload = %q", deployment.Spec.Selector.MatchLabels[WorkloadLabel])
+	}
+	if deployment.Spec.Template.Labels[WorkloadLabel] != WorkloadRuntime {
+		t.Fatalf("pod workload label = %q", deployment.Spec.Template.Labels[WorkloadLabel])
+	}
 	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
 		t.Fatalf("Replicas = %v", deployment.Spec.Replicas)
+	}
+	if deployment.Spec.Template.Annotations["codegraph.dev/repository-generation"] != "1" {
+		t.Fatalf("pod annotations = %#v", deployment.Spec.Template.Annotations)
 	}
 
 	podSpec := deployment.Spec.Template.Spec
@@ -98,17 +124,20 @@ func TestBuildDeploymentRunsHTTPMCPServerWithOverrideImageAndPVC(t *testing.T) {
 	if !reflect.DeepEqual(gotCommand, wantCommand) {
 		t.Fatalf("command = %#v", gotCommand)
 	}
-	if container.ReadinessProbe == nil || container.ReadinessProbe.HTTPGet == nil {
-		t.Fatalf("missing HTTP readiness probe")
+	if container.ReadinessProbe == nil || container.ReadinessProbe.TCPSocket == nil {
+		t.Fatalf("missing TCP readiness probe")
 	}
-	if container.ReadinessProbe.HTTPGet.Path != "/mcp" {
-		t.Fatalf("readiness path = %q", container.ReadinessProbe.HTTPGet.Path)
+	if container.ReadinessProbe.HTTPGet != nil {
+		t.Fatalf("readiness probe uses HTTP GET: %#v", container.ReadinessProbe.HTTPGet)
+	}
+	if container.ReadinessProbe.TCPSocket.Port.StrVal != "mcp" {
+		t.Fatalf("readiness TCP port = %#v", container.ReadinessProbe.TCPSocket.Port)
 	}
 	assertWorkspacePVCVolume(t, podSpec)
 	assertWorkspaceMount(t, container)
 }
 
-func TestBuildSyncJobClonesIndexesAndRecordsResolvedRef(t *testing.T) {
+func TestBuildSyncJobClonesIndexesAndWritesResolvedRefFile(t *testing.T) {
 	repo := workloadRepository()
 
 	job := BuildSyncJob(repo, "ghcr.io/acme/codegraph:default")
@@ -120,6 +149,9 @@ func TestBuildSyncJobClonesIndexesAndRecordsResolvedRef(t *testing.T) {
 	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 1 {
 		t.Fatalf("BackoffLimit = %v", job.Spec.BackoffLimit)
 	}
+	if job.Spec.Template.Labels[WorkloadLabel] != WorkloadSync {
+		t.Fatalf("pod workload label = %q", job.Spec.Template.Labels[WorkloadLabel])
+	}
 
 	podSpec := job.Spec.Template.Spec
 	if podSpec.RestartPolicy != corev1.RestartPolicyNever {
@@ -130,16 +162,39 @@ func TestBuildSyncJobClonesIndexesAndRecordsResolvedRef(t *testing.T) {
 		t.Fatalf("Command = %#v", container.Command)
 	}
 	script := container.Args[0]
+	if strings.Contains(script, "rm -rf /workspace/repo\n") {
+		t.Fatalf("script deletes current repo before replacement:\n%s", script)
+	}
 	for _, fragment := range []string{
-		`git clone "$GIT_URL" /workspace/repo`,
-		`git -C /workspace/repo checkout "$GIT_REF"`,
+		"rm -rf /workspace/repo-next",
+		`git clone "$GIT_URL" /workspace/repo-next`,
+		`git -C /workspace/repo-next checkout "$GIT_REF"`,
+		"cd /workspace/repo-next",
 		"codegraph init",
-		"codegraph index",
-		"git -C /workspace/repo rev-parse HEAD > /workspace/.resolved-ref",
+		"git -C /workspace/repo-next rev-parse HEAD > /workspace/.resolved-ref-next",
+		"rm -rf /workspace/repo-previous",
+		"if [ -d /workspace/repo ]; then mv /workspace/repo /workspace/repo-previous; fi",
+		"mv /workspace/repo-next /workspace/repo",
+		"mv /workspace/.resolved-ref-next /workspace/.resolved-ref",
+		"if [ -n \"${GIT_USERNAME:-}\" ] && [ -n \"${GIT_PASSWORD:-}\" ]; then",
+		"export GIT_ASKPASS=/tmp/codegraph-git-askpass",
+		"if [ -f /git-ssh/ssh-privatekey ]; then",
+		"cp /git-ssh/ssh-privatekey /tmp/codegraph-ssh-key",
+		"chmod 600 /tmp/codegraph-ssh-key",
+		"export GIT_SSH_COMMAND=\"ssh -i /tmp/codegraph-ssh-key -o StrictHostKeyChecking=accept-new\"",
 	} {
 		if !strings.Contains(script, fragment) {
 			t.Fatalf("script missing %q:\n%s", fragment, script)
 		}
+	}
+	if strings.Contains(script, "chmod 600 /git-ssh/ssh-privatekey") {
+		t.Fatalf("script chmods read-only secret volume key:\n%s", script)
+	}
+	if strings.Contains(script, "codegraph index") {
+		t.Fatalf("script should not run a second full index:\n%s", script)
+	}
+	if strings.Count(script, "codegraph init") != 1 {
+		t.Fatalf("codegraph init count = %d:\n%s", strings.Count(script, "codegraph init"), script)
 	}
 	assertEnvValue(t, container.Env, "GIT_URL", "https://github.com/acme/api-service.git")
 	assertEnvValue(t, container.Env, "GIT_REF", "main")
@@ -149,6 +204,30 @@ func TestBuildSyncJobClonesIndexesAndRecordsResolvedRef(t *testing.T) {
 	assertWorkspacePVCVolume(t, podSpec)
 	assertWorkspaceMount(t, container)
 	assertSSHSecretVolume(t, podSpec, "api-service-git")
+	assertSSHSecretMount(t, container)
+}
+
+func TestBuildSyncJobWithoutAuthOmitsSecretEnvAndMounts(t *testing.T) {
+	repo := workloadRepository()
+	repo.Spec.Git.AuthSecretRef = nil
+
+	job := BuildSyncJob(repo, "ghcr.io/acme/codegraph:default")
+
+	podSpec := job.Spec.Template.Spec
+	container := onlyContainer(t, podSpec.Containers)
+	if len(container.EnvFrom) != 0 {
+		t.Fatalf("EnvFrom = %#v", container.EnvFrom)
+	}
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == "git-ssh" {
+			t.Fatalf("unexpected git ssh volume: %#v", podSpec.Volumes)
+		}
+	}
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == "git-ssh" || mount.MountPath == "/git-ssh" {
+			t.Fatalf("unexpected git ssh mount: %#v", container.VolumeMounts)
+		}
+	}
 }
 
 func workloadRepository() *codegraphv1alpha1.CodeGraphRepository {
@@ -232,6 +311,16 @@ func assertSSHSecretVolume(t *testing.T, podSpec corev1.PodSpec, secretName stri
 	t.Fatalf("git ssh secret volume not found: %#v", podSpec.Volumes)
 }
 
+func assertSSHSecretMount(t *testing.T, container corev1.Container) {
+	t.Helper()
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == "git-ssh" && mount.MountPath == "/git-ssh" && mount.ReadOnly {
+			return
+		}
+	}
+	t.Fatalf("git ssh secret mount not found: %#v", container.VolumeMounts)
+}
+
 func assertEnvValue(t *testing.T, env []corev1.EnvVar, name string, want string) {
 	t.Helper()
 	for _, item := range env {
@@ -243,4 +332,13 @@ func assertEnvValue(t *testing.T, env []corev1.EnvVar, name string, want string)
 		}
 	}
 	t.Fatalf("env %s not found: %#v", name, env)
+}
+
+func selectorMatchesLabels(selector map[string]string, labels map[string]string) bool {
+	for key, value := range selector {
+		if labels[key] != value {
+			return false
+		}
+	}
+	return true
 }
