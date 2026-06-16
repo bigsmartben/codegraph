@@ -350,8 +350,24 @@ func (r *CodeGraphRepositoryReconciler) deleteIfExists(ctx context.Context, obje
 
 func applyObjectMeta(current client.Object, desired client.Object) {
 	current.SetLabels(desired.GetLabels())
-	current.SetAnnotations(desired.GetAnnotations())
+	mergeObjectAnnotations(current, desired)
 	current.SetOwnerReferences(desired.GetOwnerReferences())
+}
+
+func mergeObjectAnnotations(current client.Object, desired client.Object) {
+	desiredAnnotations := desired.GetAnnotations()
+	if len(desiredAnnotations) == 0 {
+		return
+	}
+
+	annotations := current.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	for key, value := range desiredAnnotations {
+		annotations[key] = value
+	}
+	current.SetAnnotations(annotations)
 }
 
 func applyObjectSpec(current client.Object, desired client.Object) {
