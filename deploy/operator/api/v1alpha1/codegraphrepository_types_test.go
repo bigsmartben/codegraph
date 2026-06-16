@@ -2,12 +2,13 @@ package v1alpha1
 
 import (
 	"os"
-	"strings"
+	"reflect"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/yaml"
 )
 
 func TestEndpointBuildsFromHostAndPath(t *testing.T) {
@@ -97,23 +98,77 @@ func TestAddToSchemeRegistersCodeGraphRepository(t *testing.T) {
 }
 
 func TestGeneratedCRDIncludesStructuralSchemaMarkers(t *testing.T) {
-	crd, err := os.ReadFile("../../config/crd/codegraph.dev_codegraphrepositories.yaml")
+	schema := readGeneratedOpenAPISchema(t)
+
+	conditions := schemaProperty(t, schema, "status", "conditions")
+	if got := conditions["x-kubernetes-list-type"]; got != "map" {
+		t.Fatalf("status.conditions x-kubernetes-list-type = %v", got)
+	}
+	if got := conditions["x-kubernetes-list-map-keys"]; !reflect.DeepEqual(got, []any{"type"}) {
+		t.Fatalf("status.conditions x-kubernetes-list-map-keys = %#v", got)
+	}
+
+	sync := schemaProperty(t, schema, "spec", "sync")
+	defaultValue, ok := sync["default"].(map[string]any)
+	if !ok {
+		t.Fatalf("spec.sync default = %T, want map", sync["default"])
+	}
+	if got := defaultValue["mode"]; got != "manual" {
+		t.Fatalf("spec.sync default.mode = %v", got)
+	}
+
+	host := schemaProperty(t, schema, "spec", "mcp", "host")
+	if got := host["pattern"]; got != `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$` {
+		t.Fatalf("spec.mcp.host pattern = %v", got)
+	}
+}
+
+func readGeneratedOpenAPISchema(t *testing.T) map[string]any {
+	t.Helper()
+
+	crdBytes, err := os.ReadFile("../../config/crd/codegraph.dev_codegraphrepositories.yaml")
 	if err != nil {
 		t.Fatalf("read CRD: %v", err)
 	}
-	text := string(crd)
 
-	for _, want := range []string{
-		"pattern: ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$",
-		"x-kubernetes-list-map-keys:",
-		"x-kubernetes-list-type: map",
-		"- type",
-		"              sync:",
-		"                default:",
-		"                  mode: manual",
-	} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("generated CRD missing %q", want)
-		}
+	var crd map[string]any
+	if err := yaml.Unmarshal(crdBytes, &crd); err != nil {
+		t.Fatalf("parse CRD: %v", err)
 	}
+
+	spec := mapValue(t, crd, "spec")
+	versions, ok := spec["versions"].([]any)
+	if !ok || len(versions) == 0 {
+		t.Fatalf("spec.versions = %#v", spec["versions"])
+	}
+	firstVersion, ok := versions[0].(map[string]any)
+	if !ok {
+		t.Fatalf("spec.versions[0] = %T", versions[0])
+	}
+	return mapValue(t, mapValue(t, firstVersion, "schema"), "openAPIV3Schema")
+}
+
+func schemaProperty(t *testing.T, schema map[string]any, path ...string) map[string]any {
+	t.Helper()
+
+	current := schema
+	for _, segment := range path {
+		properties := mapValue(t, current, "properties")
+		current = mapValue(t, properties, segment)
+	}
+	return current
+}
+
+func mapValue(t *testing.T, values map[string]any, key string) map[string]any {
+	t.Helper()
+
+	value, ok := values[key]
+	if !ok {
+		t.Fatalf("missing key %q in %#v", key, values)
+	}
+	mapped, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("%q = %T, want map", key, value)
+	}
+	return mapped
 }
