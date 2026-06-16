@@ -1,0 +1,13 @@
+apiVersion: codegraph.dev/v1alpha1
+kind: CodeGraphGateway
+metadata:
+  name: team-gateway
+  namespace: codegraph
+spec:
+  host: codegraph.example.com
+  path: /mcp
+  repositories:
+    - repoId: api-service
+      serviceName: codegraph-api-service
+    - repoId: web-client
+      serviceName: codegraph-web-client

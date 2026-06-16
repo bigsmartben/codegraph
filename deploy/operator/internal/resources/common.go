@@ -12,9 +12,11 @@ import (
 const (
 	AppName                = "codegraph"
 	ComponentRepositoryMCP = "repository-mcp"
+	ComponentGatewayMCP    = "gateway-mcp"
 	WorkloadLabel          = "codegraph.dev/workload"
 	WorkloadRuntime        = "runtime"
 	WorkloadSync           = "sync"
+	WorkloadGateway        = "gateway"
 	maxResourceNameLength  = 63
 	shortHashLength        = 8
 )
@@ -23,6 +25,14 @@ type Names struct {
 	Base       string
 	PVC        string
 	SyncJob    string
+	Deployment string
+	Service    string
+	Route      string
+}
+
+type GatewayNames struct {
+	Base       string
+	ConfigMap  string
 	Deployment string
 	Service    string
 	Route      string
@@ -41,12 +51,32 @@ func NamesFor(repo *codegraphv1alpha1.CodeGraphRepository) Names {
 	}
 }
 
+func GatewayNamesFor(gateway *codegraphv1alpha1.CodeGraphGateway) GatewayNames {
+	base := boundedCodeGraphName(gateway.Name, maxResourceNameLength)
+	return GatewayNames{
+		Base:       base,
+		ConfigMap:  base,
+		Deployment: base,
+		Service:    base,
+		Route:      base,
+	}
+}
+
 func LabelsFor(repo *codegraphv1alpha1.CodeGraphRepository) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       AppName,
 		"app.kubernetes.io/component":  ComponentRepositoryMCP,
 		"app.kubernetes.io/managed-by": "codegraph-operator",
 		"codegraph.dev/repo-id":        repo.Spec.RepoID,
+	}
+}
+
+func GatewayLabelsFor(gateway *codegraphv1alpha1.CodeGraphGateway) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":       AppName,
+		"app.kubernetes.io/component":  ComponentGatewayMCP,
+		"app.kubernetes.io/managed-by": "codegraph-operator",
+		"codegraph.dev/gateway":        gateway.Name,
 	}
 }
 
@@ -64,10 +94,39 @@ func RuntimeSelectorFor(repo *codegraphv1alpha1.CodeGraphRepository) map[string]
 	return selector
 }
 
+func GatewaySelectorFor(gateway *codegraphv1alpha1.CodeGraphGateway) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":      AppName,
+		"app.kubernetes.io/component": ComponentGatewayMCP,
+		"codegraph.dev/gateway":       gateway.Name,
+		WorkloadLabel:                 WorkloadGateway,
+	}
+}
+
 func OwnerFor(repo *codegraphv1alpha1.CodeGraphRepository) []metav1.OwnerReference {
 	return []metav1.OwnerReference{
 		*metav1.NewControllerRef(repo, codegraphv1alpha1.GroupVersion.WithKind("CodeGraphRepository")),
 	}
+}
+
+func GatewayOwnerFor(gateway *codegraphv1alpha1.CodeGraphGateway) []metav1.OwnerReference {
+	return []metav1.OwnerReference{
+		*metav1.NewControllerRef(gateway, codegraphv1alpha1.GroupVersion.WithKind("CodeGraphGateway")),
+	}
+}
+
+func boundedCodeGraphName(name string, maxLength int) string {
+	value := "codegraph-" + name
+	if len(value) <= maxLength {
+		return value
+	}
+
+	hash := shortRepoHash(name)
+	keep := maxLength - len(hash) - 1
+	if keep < 1 {
+		return hash[:maxLength]
+	}
+	return value[:keep] + "-" + hash
 }
 
 func boundedRepoName(repoID string, maxLength int) string {

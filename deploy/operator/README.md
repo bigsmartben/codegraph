@@ -1,6 +1,6 @@
 # CodeGraph Operator
 
-The CodeGraph Operator manages `CodeGraphRepository` custom resources. Each repository CR describes one Git repository to check out, index, and serve as a remote MCP endpoint.
+The CodeGraph Operator manages `CodeGraphRepository` and `CodeGraphGateway` custom resources. Repository CRs describe Git repositories to check out, index, and serve inside the cluster. Gateway CRs expose one shared external MCP endpoint that fans out to multiple repository runtime Services.
 
 For each `CodeGraphRepository`, the operator owns:
 
@@ -8,9 +8,15 @@ For each `CodeGraphRepository`, the operator owns:
 - A sync/index Job that clones the configured Git ref and runs `codegraph init`.
 - A runtime Deployment that serves the indexed repository.
 - A Service that exposes the runtime pod inside the cluster.
-- A route, either Gateway API `HTTPRoute` or Kubernetes `Ingress`, that exposes the MCP endpoint.
 
 The first operator version does not run a Python proxy. The runtime Deployment reuses the existing CodeGraph HTTP MCP server directly with `codegraph serve --mcp --http`.
+
+For each `CodeGraphGateway`, the operator owns:
+
+- A ConfigMap containing `repos.json` for the gateway backend list.
+- A Deployment that runs `codegraph serve --mcp --http --host 0.0.0.0 --port 3000 --gateway-repos /etc/codegraph-gateway/repos.json`.
+- A Service on port 3000.
+- A route, either Gateway API `HTTPRoute` or Kubernetes `Ingress`, that exposes the shared gateway path.
 
 ## Runtime image
 
@@ -31,20 +37,33 @@ If neither `spec.image` nor `--runtime-image` is set, the controller marks the r
 
 ## MCP endpoint
 
-All repositories share one external MCP host and use per-repository paths:
+Repository runtimes listen on `/mcp` inside the cluster. A `CodeGraphGateway` exposes a single external endpoint:
 
 ```text
-https://<host>/mcp/<repoId>
+https://<host>/mcp
 ```
 
-For example, a repository with `repoId: api-service`, `host: codegraph.example.com`, and `path: /mcp/api-service` is served at:
+A gateway with `host: codegraph.example.com` and `path: /mcp` is served at:
 
 ```text
-https://codegraph.example.com/mcp/api-service
+https://codegraph.example.com/mcp
 ```
 
-The external route rewrites `/mcp/<repoId>` to `/mcp` before forwarding to the pod. Inside the pod, CodeGraph serves the checked-out repository from `/workspace/repo`.
-`spec.mcp.path` must equal `/mcp/<repoId>`; mismatches are rejected by the CRD and marked degraded by the controller.
+The gateway prefixes backend tools with the configured `repoId`, and each backend URL in `repos.json` is generated as:
+
+```text
+http://<serviceName>.<namespace>.svc.cluster.local:3000/mcp
+```
+
+Repository CRs still create the in-cluster runtime Services. Use a `CodeGraphGateway` route for external access instead of exposing one address per repository.
+
+For a local Rancher Desktop deployment exposed through `127.0.0.1`, Codex only needs one MCP server entry:
+
+```toml
+[mcp_servers.codegraph_k8s]
+url = "http://127.0.0.1/mcp"
+enabled = true
+```
 
 ## Sample repository
 
@@ -57,6 +76,17 @@ kubectl -n codegraph get codegraphrepository api-service
 ```
 
 The sample uses manual sync, a 20Gi PVC, an explicit runtime image, and a Git authentication secret reference. Replace the image with the registry tag you built and pushed.
+
+## Sample gateway
+
+Apply a gateway after the repository Services exist:
+
+```sh
+kubectl apply -f config/samples/codegraphgateway.yaml
+kubectl -n codegraph get codegraphgateway team-gateway
+```
+
+The sample exposes `https://codegraph.example.com/mcp` and points to the `codegraph-api-service` and `codegraph-web-client` Services in the same namespace.
 
 ## Status fields
 
@@ -90,7 +120,7 @@ The controller supports two routing modes:
 - `gateway`: creates a Gateway API `HTTPRoute`. This is the default mode. Use `--gateway-name` and optionally `--gateway-namespace` to select the parent Gateway.
 - `ingress`: creates a Kubernetes `Ingress` for the nginx ingress class.
 
-Both modes expose the CR's `spec.mcp.host` and `spec.mcp.path`, then rewrite the external `/mcp/<repoId>` path to the pod-local `/mcp` endpoint.
+For `CodeGraphGateway`, both modes expose `spec.host` and `spec.path` directly to the gateway Service. For `CodeGraphRepository`, the legacy route exposes `spec.mcp.host` and `spec.mcp.path`, then rewrites `/mcp/<repoId>` to the pod-local `/mcp` endpoint.
 
 Gateway mode requires the Gateway API CRDs to be installed and a compatible `Gateway` that allows `HTTPRoute` attachment from the repository namespace. Ingress mode assumes an nginx ingress controller that honors the rewrite annotations emitted by the operator.
 
@@ -116,8 +146,10 @@ Useful local checks:
 ```sh
 kubectl apply -f config/crd
 kubectl apply -f config/samples/codegraphrepository.yaml
+kubectl apply -f config/samples/codegraphgateway.yaml
 kubectl -n codegraph describe codegraphrepository api-service
-kubectl -n codegraph get pvc,job,deploy,svc
+kubectl -n codegraph describe codegraphgateway team-gateway
+kubectl -n codegraph get pvc,job,deploy,svc,cm
 ```
 
 ## Root validation

@@ -1,0 +1,19 @@
+apiVersion: codegraph.dev/v1alpha1
+kind: CodeGraphGateway
+metadata:
+  name: local
+  namespace: codegraph-verify
+spec:
+  host: "127.0.0.1"
+  path: /mcp
+  repositories:
+    - repoId: hello-1
+      serviceName: codegraph-hello-1
+    - repoId: hello-2
+      serviceName: codegraph-hello-2
+    - repoId: hello-3
+      serviceName: codegraph-hello-3
+    - repoId: hello-4
+      serviceName: codegraph-hello-4
+    - repoId: hello-5
+      serviceName: codegraph-hello-5

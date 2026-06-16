@@ -76,6 +76,18 @@ func main() {
 		ctrl.Log.Error(err, "unable to create controller")
 		os.Exit(1)
 	}
+	gatewayReconciler := &controller.CodeGraphGatewayReconciler{
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		DefaultImage:     runtimeImage,
+		RouteMode:        routeMode,
+		GatewayName:      gatewayName,
+		GatewayNamespace: gatewayNamespace,
+	}
+	if err := gatewayReconciler.SetupWithManager(mgr); err != nil {
+		ctrl.Log.Error(err, "unable to create gateway controller")
+		os.Exit(1)
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		ctrl.Log.Error(err, "unable to set up health check")

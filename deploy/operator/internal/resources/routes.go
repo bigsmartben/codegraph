@@ -1,6 +1,9 @@
 package resources
 
 import (
+	"net"
+	"strings"
+
 	codegraphv1alpha1 "github.com/colbymchenry/codegraph/deploy/operator/api/v1alpha1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -119,4 +122,98 @@ func BuildIngress(repo *codegraphv1alpha1.CodeGraphRepository) *networkingv1.Ing
 			},
 		},
 	}
+}
+
+func BuildGatewayHTTPRoute(gateway *codegraphv1alpha1.CodeGraphGateway, config RouteConfig) *gatewayv1.HTTPRoute {
+	names := GatewayNamesFor(gateway)
+	pathType := gatewayv1.PathMatchPathPrefix
+	pathValue := gateway.GatewayPath()
+	backendPort := gatewayv1.PortNumber(MCPPort)
+	parentRef := gatewayv1.ParentReference{Name: gatewayv1.ObjectName(config.GatewayName)}
+	if config.GatewayNamespace != "" {
+		namespace := gatewayv1.Namespace(config.GatewayNamespace)
+		parentRef.Namespace = &namespace
+	}
+
+	return &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            names.Route,
+			Namespace:       gateway.Namespace,
+			Labels:          GatewayLabelsFor(gateway),
+			OwnerReferences: GatewayOwnerFor(gateway),
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{parentRef},
+			},
+			Hostnames: []gatewayv1.Hostname{gatewayv1.Hostname(gateway.Spec.Host)},
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					Matches: []gatewayv1.HTTPRouteMatch{
+						{
+							Path: &gatewayv1.HTTPPathMatch{
+								Type:  &pathType,
+								Value: &pathValue,
+							},
+						},
+					},
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: gatewayv1.ObjectName(names.Service),
+									Port: &backendPort,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func BuildGatewayIngress(gateway *codegraphv1alpha1.CodeGraphGateway) *networkingv1.Ingress {
+	names := GatewayNamesFor(gateway)
+	pathType := networkingv1.PathTypeExact
+	host := gateway.Spec.Host
+	if isIPHost(host) {
+		host = ""
+	}
+
+	return &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            names.Route,
+			Namespace:       gateway.Namespace,
+			Labels:          GatewayLabelsFor(gateway),
+			OwnerReferences: GatewayOwnerFor(gateway),
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{
+				{
+					Host: host,
+					IngressRuleValue: networkingv1.IngressRuleValue{
+						HTTP: &networkingv1.HTTPIngressRuleValue{
+							Paths: []networkingv1.HTTPIngressPath{
+								{
+									Path:     gateway.GatewayPath(),
+									PathType: &pathType,
+									Backend: networkingv1.IngressBackend{
+										Service: &networkingv1.IngressServiceBackend{
+											Name: names.Service,
+											Port: networkingv1.ServiceBackendPort{Number: MCPPort},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func isIPHost(host string) bool {
+	return net.ParseIP(strings.Trim(host, "[]")) != nil
 }

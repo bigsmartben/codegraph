@@ -390,6 +390,11 @@ func applyObjectSpec(current client.Object, desired client.Object) {
 		current.Spec = desired.(*gatewayv1.HTTPRoute).Spec
 	case *appsv1.Deployment:
 		current.Spec = desired.(*appsv1.Deployment).Spec
+	case *corev1.ConfigMap:
+		desiredConfigMap := desired.(*corev1.ConfigMap)
+		current.Immutable = desiredConfigMap.Immutable
+		current.Data = desiredConfigMap.Data
+		current.BinaryData = desiredConfigMap.BinaryData
 	}
 }
 
