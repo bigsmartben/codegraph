@@ -154,9 +154,12 @@ func TestReconcileBlocksNextGenerationSyncWhileStaleRuntimePodExists(t *testing.
 	staleRuntimePod.Finalizers = []string{"codegraph.dev/test-finalizer"}
 	reconciler := newTestReconciler(t, repo, staleRuntimePod)
 
-	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("RequeueAfter = %s, want positive duration", result.RequeueAfter)
 	}
 
 	var job batchv1.Job
@@ -165,6 +168,22 @@ func TestReconcileBlocksNextGenerationSyncWhileStaleRuntimePodExists(t *testing.
 		t.Fatalf("sync job get error = %v, want NotFound", err)
 	}
 	assertRepositoryRuntimeShutdownStatus(t, ctx, reconciler.Client, repo)
+}
+
+func TestReconcileIgnoresStaleSyncJobPodWhenStartingNextGenerationSync(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	repo.Generation = 2
+	staleSyncPod := syncJobPod(repo, "codegraph-api-service-sync-1-pod")
+	reconciler := newTestReconciler(t, repo, staleSyncPod)
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	assertExistsAndOwned(t, ctx, reconciler.Client, &batchv1.Job{}, repo, "codegraph-api-service-sync-2")
+	assertRepositoryIndexingStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
 }
 
 func TestReconcileCreatesNextGenerationSyncWhenRuntimePodsAreCurrent(t *testing.T) {
@@ -670,8 +689,20 @@ func runtimePod(repo *codegraphv1alpha1.CodeGraphRepository, name string, genera
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   repo.Namespace,
-			Labels:      resources.SelectorFor(repo),
+			Labels:      resources.RuntimeSelectorFor(repo),
 			Annotations: map[string]string{resources.RepositoryGenerationAnnotation: generation},
+		},
+	}
+}
+
+func syncJobPod(repo *codegraphv1alpha1.CodeGraphRepository, name string) *corev1.Pod {
+	labels := resources.LabelsFor(repo)
+	labels[resources.WorkloadLabel] = resources.WorkloadSync
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: repo.Namespace,
+			Labels:    labels,
 		},
 	}
 }

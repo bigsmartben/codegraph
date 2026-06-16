@@ -12,6 +12,9 @@ import (
 const (
 	AppName                = "codegraph"
 	ComponentRepositoryMCP = "repository-mcp"
+	WorkloadLabel          = "codegraph.dev/workload"
+	WorkloadRuntime        = "runtime"
+	WorkloadSync           = "sync"
 	maxResourceNameLength  = 63
 	shortHashLength        = 8
 )
@@ -53,6 +56,12 @@ func SelectorFor(repo *codegraphv1alpha1.CodeGraphRepository) map[string]string 
 		"app.kubernetes.io/component": ComponentRepositoryMCP,
 		"codegraph.dev/repo-id":       repo.Spec.RepoID,
 	}
+}
+
+func RuntimeSelectorFor(repo *codegraphv1alpha1.CodeGraphRepository) map[string]string {
+	selector := SelectorFor(repo)
+	selector[WorkloadLabel] = WorkloadRuntime
+	return selector
 }
 
 func OwnerFor(repo *codegraphv1alpha1.CodeGraphRepository) []metav1.OwnerReference {

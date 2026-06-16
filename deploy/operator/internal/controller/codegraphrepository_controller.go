@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	codegraphv1alpha1 "github.com/colbymchenry/codegraph/deploy/operator/api/v1alpha1"
 	"github.com/colbymchenry/codegraph/deploy/operator/internal/resources"
@@ -20,7 +21,10 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-const defaultGatewayName = "codegraph"
+const (
+	defaultGatewayName       = "codegraph"
+	staleRuntimeRequeueAfter = 5 * time.Second
+)
 
 type CodeGraphRepositoryReconciler struct {
 	client.Client
@@ -187,17 +191,19 @@ func (r *CodeGraphRepositoryReconciler) shutdownStaleRuntimeBeforeSync(ctx conte
 			return result, true, markErr
 		}
 		result, err := r.markIndexWaiting(ctx, repo, codegraphv1alpha1.PhasePending, "RuntimeShutdown", "waiting for stale runtime deployment to stop before syncing")
+		result.RequeueAfter = staleRuntimeRequeueAfter
 		return result, true, err
 	}
 
 	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods, client.InNamespace(repo.Namespace), client.MatchingLabels(resources.SelectorFor(repo))); err != nil {
+	if err := r.List(ctx, pods, client.InNamespace(repo.Namespace), client.MatchingLabels(resources.RuntimeSelectorFor(repo))); err != nil {
 		result, markErr := r.markDegraded(ctx, repo, "RuntimePodsReadFailed", err)
 		return result, true, markErr
 	}
 	for _, pod := range pods.Items {
 		if podRepositoryGeneration(pod) != currentGeneration {
 			result, err := r.markIndexWaiting(ctx, repo, codegraphv1alpha1.PhasePending, "RuntimeShutdown", "waiting for stale runtime pods to stop before syncing")
+			result.RequeueAfter = staleRuntimeRequeueAfter
 			return result, true, err
 		}
 	}
