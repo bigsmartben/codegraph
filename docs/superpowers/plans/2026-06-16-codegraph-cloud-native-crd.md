@@ -16,7 +16,7 @@ Create a nested Go module so operator dependencies do not affect the npm package
 
 - `deploy/operator/go.mod`: Go module and Kubernetes dependencies.
 - `deploy/operator/Makefile`: repeatable generate, manifest, test, and build commands.
-- `deploy/operator/cmd/manager/main.go`: controller manager entrypoint.
+- `deploy/operator/cmd/manager/main.go`: controller manager shell; Task 6 wires in the repository controller after API and controller packages exist.
 - `deploy/operator/api/v1alpha1/groupversion_info.go`: API group registration.
 - `deploy/operator/api/v1alpha1/codegraphrepository_types.go`: CRD spec/status types and validation markers.
 - `deploy/operator/internal/resources/`: pure resource builders for names, labels, PVC, Job, Deployment, Service, HTTPRoute, and Ingress.
@@ -90,10 +90,6 @@ import (
 	"flag"
 	"os"
 
-	codegraphv1alpha1 "github.com/colbymchenry/codegraph/deploy/operator/api/v1alpha1"
-	"github.com/colbymchenry/codegraph/deploy/operator/internal/controller"
-	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -107,26 +103,16 @@ var scheme = runtime.NewScheme()
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(codegraphv1alpha1.AddToScheme(scheme))
-	utilruntime.Must(gatewayv1.Install(scheme))
 }
 
 func main() {
 	var metricsAddr string
 	var probeAddr string
 	var enableLeaderElection bool
-	var gatewayName string
-	var gatewayNamespace string
-	var routeMode string
-	var runtimeImage string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager.")
-	flag.StringVar(&gatewayName, "gateway-name", "codegraph", "Gateway name used when route-mode=gateway.")
-	flag.StringVar(&gatewayNamespace, "gateway-namespace", "", "Gateway namespace used when route-mode=gateway. Defaults to each repository namespace.")
-	flag.StringVar(&routeMode, "route-mode", "gateway", "Routing mode: gateway or ingress.")
-	flag.StringVar(&runtimeImage, "runtime-image", "ghcr.io/colbymchenry/codegraph:latest", "Default CodeGraph runtime image.")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{})))
@@ -140,21 +126,6 @@ func main() {
 	})
 	if err != nil {
 		ctrl.Log.Error(err, "unable to start manager")
-		os.Exit(1)
-	}
-
-	reconciler := &controller.CodeGraphRepositoryReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Config: controller.Config{
-			DefaultImage:     runtimeImage,
-			RouteMode:        routeMode,
-			GatewayName:      gatewayName,
-			GatewayNamespace: gatewayNamespace,
-		},
-	}
-	if err := reconciler.SetupWithManager(mgr); err != nil {
-		ctrl.Log.Error(err, "unable to create controller")
 		os.Exit(1)
 	}
 
@@ -185,7 +156,7 @@ go mod tidy
 
 Expected: command exits with status 0 and creates `deploy/operator/go.sum`.
 
-- [ ] **Step 5: Run the initial build and capture expected missing packages**
+- [ ] **Step 5: Run the initial operator tests**
 
 Run:
 
@@ -194,7 +165,7 @@ cd deploy/operator
 go test ./...
 ```
 
-Expected: FAIL because `api/v1alpha1` and `internal/controller` packages do not exist yet. The failure should be missing local packages, not dependency download errors.
+Expected: PASS. The repository controller is wired in Task 6 after the API and controller packages exist.
 
 - [ ] **Step 6: Commit scaffold files**
 
@@ -1298,6 +1269,7 @@ git commit -m "feat: build codegraph repository routes"
 **Files:**
 - Create: `deploy/operator/internal/controller/codegraphrepository_controller.go`
 - Create: `deploy/operator/internal/controller/codegraphrepository_controller_test.go`
+- Modify: `deploy/operator/cmd/manager/main.go`
 
 Important sequencing constraint: this task must not start the runtime Deployment before the sync/index Job has succeeded. The first reconcile creates PVC, sync/index Job, Service, and route only. Task 7 adds the job-success path that creates or rolls the Deployment, so the MCP runtime opens a completed index instead of holding a stale SQLite handle across repository replacement.
 
@@ -1576,7 +1548,102 @@ func (r *CodeGraphRepositoryReconciler) SetupWithManager(mgr ctrl.Manager) error
 }
 ```
 
-- [ ] **Step 4: Run controller tests**
+- [ ] **Step 4: Wire the controller into the manager**
+
+Replace `deploy/operator/cmd/manager/main.go` with:
+
+```go
+package main
+
+import (
+	"flag"
+	"os"
+
+	codegraphv1alpha1 "github.com/colbymchenry/codegraph/deploy/operator/api/v1alpha1"
+	"github.com/colbymchenry/codegraph/deploy/operator/internal/controller"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+)
+
+var scheme = runtime.NewScheme()
+
+func init() {
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(codegraphv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(gatewayv1.Install(scheme))
+}
+
+func main() {
+	var metricsAddr string
+	var probeAddr string
+	var enableLeaderElection bool
+	var gatewayName string
+	var gatewayNamespace string
+	var routeMode string
+	var runtimeImage string
+
+	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
+	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager.")
+	flag.StringVar(&gatewayName, "gateway-name", "codegraph", "Gateway name used when route-mode=gateway.")
+	flag.StringVar(&gatewayNamespace, "gateway-namespace", "", "Gateway namespace used when route-mode=gateway. Defaults to each repository namespace.")
+	flag.StringVar(&routeMode, "route-mode", "gateway", "Routing mode: gateway or ingress.")
+	flag.StringVar(&runtimeImage, "runtime-image", "ghcr.io/colbymchenry/codegraph:latest", "Default CodeGraph runtime image.")
+	flag.Parse()
+
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{})))
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
+		HealthProbeBindAddress: probeAddr,
+		LeaderElection:         enableLeaderElection,
+		LeaderElectionID:       "codegraph.dev",
+	})
+	if err != nil {
+		ctrl.Log.Error(err, "unable to start manager")
+		os.Exit(1)
+	}
+
+	reconciler := &controller.CodeGraphRepositoryReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Config: controller.Config{
+			DefaultImage:     runtimeImage,
+			RouteMode:        routeMode,
+			GatewayName:      gatewayName,
+			GatewayNamespace: gatewayNamespace,
+		},
+	}
+	if err := reconciler.SetupWithManager(mgr); err != nil {
+		ctrl.Log.Error(err, "unable to create controller")
+		os.Exit(1)
+	}
+
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		ctrl.Log.Error(err, "unable to set up health check")
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		ctrl.Log.Error(err, "unable to set up ready check")
+		os.Exit(1)
+	}
+
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		ctrl.Log.Error(err, "problem running manager")
+		os.Exit(1)
+	}
+}
+```
+
+- [ ] **Step 5: Run controller tests**
 
 Run:
 
@@ -1587,7 +1654,7 @@ go test ./internal/controller
 
 Expected: PASS.
 
-- [ ] **Step 5: Run all operator tests**
+- [ ] **Step 6: Run all operator tests**
 
 Run:
 
@@ -1598,7 +1665,7 @@ go test ./...
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit reconciler creation**
+- [ ] **Step 7: Commit reconciler creation**
 
 Run:
 
