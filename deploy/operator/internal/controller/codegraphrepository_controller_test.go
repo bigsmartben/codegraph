@@ -46,7 +46,83 @@ func TestReconcileCreatesRepositoryResourcesWithGatewayRoute(t *testing.T) {
 		t.Fatalf("deployment get error = %v, want NotFound", err)
 	}
 
-	assertRepositoryPendingStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
+	assertRepositoryIndexingStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
+}
+
+func TestReconcileMarksReadyWhenJobAndDeploymentAreReady(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	reconciler := newTestReconciler(t, repo)
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("first Reconcile() error = %v", err)
+	}
+
+	var job batchv1.Job
+	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service-sync-1"}, &job); err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	job.Status.Succeeded = 1
+	if err := reconciler.Status().Update(ctx, &job); err != nil {
+		t.Fatalf("update job status: %v", err)
+	}
+
+	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("second Reconcile() error = %v", err)
+	}
+
+	assertExistsAndOwned(t, ctx, reconciler.Client, &appsv1.Deployment{}, repo, "codegraph-api-service")
+	assertRepositoryRuntimePendingStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
+
+	var deployment appsv1.Deployment
+	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service"}, &deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	deployment.Status.AvailableReplicas = 1
+	if err := reconciler.Status().Update(ctx, &deployment); err != nil {
+		t.Fatalf("update deployment status: %v", err)
+	}
+
+	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("third Reconcile() error = %v", err)
+	}
+
+	assertRepositoryReadyStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
+}
+
+func TestReconcileMarksDegradedWhenJobFails(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	reconciler := newTestReconciler(t, repo)
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("first Reconcile() error = %v", err)
+	}
+
+	var job batchv1.Job
+	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service-sync-1"}, &job); err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	job.Status.Failed = 1
+	if err := reconciler.Status().Update(ctx, &job); err != nil {
+		t.Fatalf("update job status: %v", err)
+	}
+
+	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("second Reconcile() error = %v", err)
+	}
+
+	var deployment appsv1.Deployment
+	err = reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service"}, &deployment)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("deployment get error = %v, want NotFound", err)
+	}
+	assertRepositoryDegradedIndexStatus(t, ctx, reconciler.Client, repo)
 }
 
 func TestReconcileCreatesIngressWhenConfigured(t *testing.T) {
@@ -68,7 +144,7 @@ func TestReconcileCreatesIngressWhenConfigured(t *testing.T) {
 		t.Fatalf("HTTPRoute get error = %v, want NotFound", err)
 	}
 
-	assertRepositoryPendingStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
+	assertRepositoryIndexingStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
 }
 
 func TestReconcilePreservesExistingPVCSpec(t *testing.T) {
@@ -213,7 +289,7 @@ func newTestReconciler(t *testing.T, objects ...client.Object) *CodeGraphReposit
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(objects...).
-		WithStatusSubresource(repo).
+		WithStatusSubresource(repo, &batchv1.Job{}, &appsv1.Deployment{}).
 		Build()
 
 	return &CodeGraphRepositoryReconciler{
@@ -289,7 +365,7 @@ func assertOwnedByRepository(t *testing.T, owners []metav1.OwnerReference, repo 
 	}
 }
 
-func assertRepositoryPendingStatus(t *testing.T, ctx context.Context, c client.Client, repo *codegraphv1alpha1.CodeGraphRepository, serviceName string, routeName string) {
+func assertRepositoryIndexingStatus(t *testing.T, ctx context.Context, c client.Client, repo *codegraphv1alpha1.CodeGraphRepository, serviceName string, routeName string) {
 	t.Helper()
 
 	var updated codegraphv1alpha1.CodeGraphRepository
@@ -299,7 +375,7 @@ func assertRepositoryPendingStatus(t *testing.T, ctx context.Context, c client.C
 	if updated.Status.ObservedGeneration != repo.Generation {
 		t.Fatalf("observedGeneration = %d", updated.Status.ObservedGeneration)
 	}
-	if updated.Status.Phase != codegraphv1alpha1.PhasePending {
+	if updated.Status.Phase != codegraphv1alpha1.PhaseIndexing {
 		t.Fatalf("phase = %q", updated.Status.Phase)
 	}
 	if updated.Status.Endpoint != "https://codegraph.example.com/mcp/api-service" {
@@ -312,11 +388,87 @@ func assertRepositoryPendingStatus(t *testing.T, ctx context.Context, c client.C
 		t.Fatalf("routeName = %q", updated.Status.RouteName)
 	}
 	ready := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "ResourcesApplied" {
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "IndexRunning" {
 		t.Fatalf("Ready condition = %#v", ready)
 	}
 	indexed := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionIndexed)
 	if indexed == nil || indexed.Status != metav1.ConditionFalse || indexed.Reason != "IndexRunning" {
 		t.Fatalf("Indexed condition = %#v", indexed)
 	}
+}
+
+func assertRepositoryRuntimePendingStatus(t *testing.T, ctx context.Context, c client.Client, repo *codegraphv1alpha1.CodeGraphRepository, serviceName string, routeName string) {
+	t.Helper()
+
+	updated := assertRepositoryStatusNames(t, ctx, c, repo, serviceName, routeName)
+	if updated.Status.Phase != codegraphv1alpha1.PhasePending {
+		t.Fatalf("phase = %q", updated.Status.Phase)
+	}
+	ready := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "RuntimeUnavailable" {
+		t.Fatalf("Ready condition = %#v", ready)
+	}
+	indexed := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionIndexed)
+	if indexed == nil || indexed.Status != metav1.ConditionTrue || indexed.Reason != "IndexSucceeded" {
+		t.Fatalf("Indexed condition = %#v", indexed)
+	}
+}
+
+func assertRepositoryReadyStatus(t *testing.T, ctx context.Context, c client.Client, repo *codegraphv1alpha1.CodeGraphRepository, serviceName string, routeName string) {
+	t.Helper()
+
+	updated := assertRepositoryStatusNames(t, ctx, c, repo, serviceName, routeName)
+	if updated.Status.Phase != codegraphv1alpha1.PhaseReady {
+		t.Fatalf("phase = %q", updated.Status.Phase)
+	}
+	ready := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != "RuntimeAvailable" {
+		t.Fatalf("Ready condition = %#v", ready)
+	}
+	indexed := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionIndexed)
+	if indexed == nil || indexed.Status != metav1.ConditionTrue || indexed.Reason != "IndexSucceeded" {
+		t.Fatalf("Indexed condition = %#v", indexed)
+	}
+}
+
+func assertRepositoryDegradedIndexStatus(t *testing.T, ctx context.Context, c client.Client, repo *codegraphv1alpha1.CodeGraphRepository) {
+	t.Helper()
+
+	var updated codegraphv1alpha1.CodeGraphRepository
+	if err := c.Get(ctx, client.ObjectKeyFromObject(repo), &updated); err != nil {
+		t.Fatalf("get updated repo: %v", err)
+	}
+	if updated.Status.Phase != codegraphv1alpha1.PhaseDegraded {
+		t.Fatalf("phase = %q", updated.Status.Phase)
+	}
+	ready := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "IndexFailed" {
+		t.Fatalf("Ready condition = %#v", ready)
+	}
+	indexed := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionIndexed)
+	if indexed == nil || indexed.Status != metav1.ConditionFalse || indexed.Reason != "IndexFailed" {
+		t.Fatalf("Indexed condition = %#v", indexed)
+	}
+}
+
+func assertRepositoryStatusNames(t *testing.T, ctx context.Context, c client.Client, repo *codegraphv1alpha1.CodeGraphRepository, serviceName string, routeName string) codegraphv1alpha1.CodeGraphRepository {
+	t.Helper()
+
+	var updated codegraphv1alpha1.CodeGraphRepository
+	if err := c.Get(ctx, client.ObjectKeyFromObject(repo), &updated); err != nil {
+		t.Fatalf("get updated repo: %v", err)
+	}
+	if updated.Status.ObservedGeneration != repo.Generation {
+		t.Fatalf("observedGeneration = %d", updated.Status.ObservedGeneration)
+	}
+	if updated.Status.Endpoint != "https://codegraph.example.com/mcp/api-service" {
+		t.Fatalf("endpoint = %q", updated.Status.Endpoint)
+	}
+	if updated.Status.ServiceName != serviceName {
+		t.Fatalf("serviceName = %q", updated.Status.ServiceName)
+	}
+	if updated.Status.RouteName != routeName {
+		t.Fatalf("routeName = %q", updated.Status.RouteName)
+	}
+	return updated
 }
