@@ -27,7 +27,7 @@ Then either set `spec.image` on each `CodeGraphRepository`, or start the control
 go run ./cmd/manager --runtime-image=registry.example.com/codegraph-runtime:1.0.1
 ```
 
-If neither `spec.image` nor `--runtime-image` is set, the controller marks the repository `Degraded` with reason `RuntimeImageMissing` and does not create the PVC or sync Job.
+If neither `spec.image` nor `--runtime-image` is set, the controller marks the repository `Degraded` with reason `RuntimeImageMissing` and does not create a new PVC or sync Job. Existing runtime resources are left in place so the last healthy repository can keep serving until a valid image is restored.
 
 ## MCP endpoint
 

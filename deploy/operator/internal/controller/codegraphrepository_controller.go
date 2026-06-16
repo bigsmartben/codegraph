@@ -74,6 +74,9 @@ func (r *CodeGraphRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.
 	if result, blocked, err := r.shutdownStaleRuntimeBeforeSync(ctx, &repo); blocked || err != nil {
 		return result, err
 	}
+	if result, blocked, err := r.waitForPreviousSyncJobs(ctx, &repo); blocked || err != nil {
+		return result, err
+	}
 	if err := r.ensureJob(ctx, &repo, resources.BuildSyncJob(&repo, r.DefaultImage)); err != nil {
 		return r.markDegraded(ctx, &repo, "SyncJobApplyFailed", err)
 	}
@@ -211,6 +214,35 @@ func (r *CodeGraphRepositoryReconciler) shutdownStaleRuntimeBeforeSync(ctx conte
 		}
 	}
 	return ctrl.Result{}, false, nil
+}
+
+func (r *CodeGraphRepositoryReconciler) waitForPreviousSyncJobs(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) (ctrl.Result, bool, error) {
+	names := resources.NamesFor(repo)
+	var jobs batchv1.JobList
+	if err := r.List(ctx, &jobs, client.InNamespace(repo.Namespace)); err != nil {
+		result, markErr := r.markDegraded(ctx, repo, "SyncJobsReadFailed", err)
+		return result, true, markErr
+	}
+	for _, job := range jobs.Items {
+		if job.Name == names.SyncJob || !ownedByRepository(&job, repo) {
+			continue
+		}
+		if job.Status.Succeeded == 0 && !jobTerminalFailed(&job) {
+			result, err := r.markIndexWaiting(ctx, repo, codegraphv1alpha1.PhasePending, "SyncInProgress", "waiting for previous sync/index job to finish before starting a new sync")
+			result.RequeueAfter = staleRuntimeRequeueAfter
+			return result, true, err
+		}
+	}
+	return ctrl.Result{}, false, nil
+}
+
+func ownedByRepository(object client.Object, repo *codegraphv1alpha1.CodeGraphRepository) bool {
+	for _, owner := range object.GetOwnerReferences() {
+		if owner.UID == repo.UID && owner.Kind == "CodeGraphRepository" && owner.APIVersion == codegraphv1alpha1.GroupVersion.String() {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *CodeGraphRepositoryReconciler) ensureRoute(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) error {
