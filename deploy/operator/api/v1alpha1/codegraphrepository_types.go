@@ -39,6 +39,7 @@ type CodeGraphRepositorySpec struct {
 
 	Storage StorageSpec `json:"storage"`
 
+	// +kubebuilder:default={mode:manual}
 	Sync SyncSpec `json:"sync,omitempty"`
 
 	// Image overrides the operator default CodeGraph runtime image.
@@ -79,6 +80,7 @@ type GitSpec struct {
 type MCPSpec struct {
 	// Host is the shared external MCP host.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`
 	Host string `json:"host"`
 
 	// Path is the external path, normally /mcp/<repoId>.
@@ -104,14 +106,16 @@ type SyncSpec struct {
 
 // CodeGraphRepositoryStatus defines the observed state of CodeGraphRepository.
 type CodeGraphRepositoryStatus struct {
-	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
-	Phase              string             `json:"phase,omitempty"`
-	Conditions         []metav1.Condition `json:"conditions,omitempty"`
-	ResolvedRef        string             `json:"resolvedRef,omitempty"`
-	LastSyncTime       *metav1.Time       `json:"lastSyncTime,omitempty"`
-	Endpoint           string             `json:"endpoint,omitempty"`
-	ServiceName        string             `json:"serviceName,omitempty"`
-	RouteName          string             `json:"routeName,omitempty"`
+	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
+	Phase              string `json:"phase,omitempty"`
+	// +listType=map
+	// +listMapKey=type
+	Conditions   []metav1.Condition `json:"conditions,omitempty"`
+	ResolvedRef  string             `json:"resolvedRef,omitempty"`
+	LastSyncTime *metav1.Time       `json:"lastSyncTime,omitempty"`
+	Endpoint     string             `json:"endpoint,omitempty"`
+	ServiceName  string             `json:"serviceName,omitempty"`
+	RouteName    string             `json:"routeName,omitempty"`
 }
 
 // +kubebuilder:object:root=true

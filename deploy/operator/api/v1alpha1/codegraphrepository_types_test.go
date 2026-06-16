@@ -1,10 +1,13 @@
 package v1alpha1
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 func TestEndpointBuildsFromHostAndPath(t *testing.T) {
@@ -75,5 +78,42 @@ func TestStorageSizeUsesQuantity(t *testing.T) {
 
 	if repo.Spec.Storage.Size.String() != "20Gi" {
 		t.Fatalf("storage size = %s", repo.Spec.Storage.Size.String())
+	}
+}
+
+func TestAddToSchemeRegistersCodeGraphRepository(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	obj, err := scheme.New(GroupVersion.WithKind("CodeGraphRepository"))
+	if err != nil {
+		t.Fatalf("scheme.New(CodeGraphRepository) error = %v", err)
+	}
+	if _, ok := obj.(*CodeGraphRepository); !ok {
+		t.Fatalf("scheme.New(CodeGraphRepository) = %T", obj)
+	}
+}
+
+func TestGeneratedCRDIncludesStructuralSchemaMarkers(t *testing.T) {
+	crd, err := os.ReadFile("../../config/crd/codegraph.dev_codegraphrepositories.yaml")
+	if err != nil {
+		t.Fatalf("read CRD: %v", err)
+	}
+	text := string(crd)
+
+	for _, want := range []string{
+		"pattern: ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$",
+		"x-kubernetes-list-map-keys:",
+		"x-kubernetes-list-type: map",
+		"- type",
+		"              sync:",
+		"                default:",
+		"                  mode: manual",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("generated CRD missing %q", want)
+		}
 	}
 }

@@ -1008,6 +1008,7 @@ spec:
                   host:
                     description: Host is the shared external MCP host.
                     minLength: 1
+                    pattern: ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$
                     type: string
                   path:
                     description: Path is the external path, normally /mcp/<repoId>.
@@ -1103,6 +1104,8 @@ spec:
                 - size
                 type: object
               sync:
+                default:
+                  mode: manual
                 properties:
                   mode:
                     default: manual
@@ -1215,6 +1218,9 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               endpoint:
                 type: string
               lastSyncTime:
