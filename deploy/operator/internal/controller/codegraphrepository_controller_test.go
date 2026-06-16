@@ -63,6 +63,7 @@ func TestReconcileMarksReadyWhenJobAndDeploymentAreReady(t *testing.T) {
 	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service-sync-1"}, &job); err != nil {
 		t.Fatalf("get job: %v", err)
 	}
+	job.Status.Failed = 1
 	job.Status.Succeeded = 1
 	if err := reconciler.Status().Update(ctx, &job); err != nil {
 		t.Fatalf("update job status: %v", err)
@@ -108,6 +109,12 @@ func TestReconcileMarksDegradedWhenJobFails(t *testing.T) {
 		t.Fatalf("get job: %v", err)
 	}
 	job.Status.Failed = 1
+	job.Status.Conditions = []batchv1.JobCondition{
+		{
+			Type:   batchv1.JobFailed,
+			Status: corev1.ConditionTrue,
+		},
+	}
 	if err := reconciler.Status().Update(ctx, &job); err != nil {
 		t.Fatalf("update job status: %v", err)
 	}
@@ -123,6 +130,38 @@ func TestReconcileMarksDegradedWhenJobFails(t *testing.T) {
 		t.Fatalf("deployment get error = %v, want NotFound", err)
 	}
 	assertRepositoryDegradedIndexStatus(t, ctx, reconciler.Client, repo)
+}
+
+func TestReconcileKeepsRetryingJobIndexingUntilTerminalFailure(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	reconciler := newTestReconciler(t, repo)
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("first Reconcile() error = %v", err)
+	}
+
+	var job batchv1.Job
+	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service-sync-1"}, &job); err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	job.Status.Failed = 1
+	if err := reconciler.Status().Update(ctx, &job); err != nil {
+		t.Fatalf("update job status: %v", err)
+	}
+
+	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("second Reconcile() error = %v", err)
+	}
+
+	var deployment appsv1.Deployment
+	err = reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service"}, &deployment)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("deployment get error = %v, want NotFound", err)
+	}
+	assertRepositoryIndexingStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
 }
 
 func TestReconcileCreatesIngressWhenConfigured(t *testing.T) {

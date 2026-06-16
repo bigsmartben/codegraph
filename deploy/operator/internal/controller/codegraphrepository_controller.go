@@ -77,10 +77,10 @@ func (r *CodeGraphRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.
 	if !found {
 		return r.markIndexWaiting(ctx, &repo, codegraphv1alpha1.PhasePending, "SyncJobMissing", "waiting for sync/index job to be created")
 	}
-	if job.Status.Failed > 0 {
-		return r.markIndexFailed(ctx, &repo)
-	}
 	if job.Status.Succeeded == 0 {
+		if jobTerminalFailed(job) {
+			return r.markIndexFailed(ctx, &repo)
+		}
 		return r.markIndexWaiting(ctx, &repo, codegraphv1alpha1.PhaseIndexing, "IndexRunning", "waiting for sync/index job to complete")
 	}
 
@@ -121,6 +121,15 @@ func (r *CodeGraphRepositoryReconciler) getDeployment(ctx context.Context, repo 
 		return nil, false, err
 	}
 	return &deployment, true, nil
+}
+
+func jobTerminalFailed(job *batchv1.Job) bool {
+	for _, condition := range job.Status.Conditions {
+		if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *CodeGraphRepositoryReconciler) ensureRoute(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) error {
