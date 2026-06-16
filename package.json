@@ -19,6 +19,7 @@
     "dev": "tsc --watch",
     "cli": "npm run build && node dist/bin/codegraph.js",
     "test": "node --liftoff-only ./node_modules/vitest/vitest.mjs run",
+    "test:operator": "cd deploy/operator && go test ./...",
     "test:watch": "node --liftoff-only ./node_modules/vitest/vitest.mjs",
     "test:eval": "node --liftoff-only ./node_modules/vitest/vitest.mjs run __tests__/evaluation/",
     "eval": "npm run build && npx tsx __tests__/evaluation/runner.ts",

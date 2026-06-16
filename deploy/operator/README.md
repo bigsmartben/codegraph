@@ -95,3 +95,13 @@ kubectl apply -f config/samples/codegraphrepository.yaml
 kubectl -n codegraph describe codegraphrepository api-service
 kubectl -n codegraph get pvc,job,deploy,svc
 ```
+
+## Root validation
+
+From the repository root, run the operator validation entry point with:
+
+```sh
+npm run test:operator
+```
+
+This runs only the Go operator tests under `deploy/operator`; it does not run the full TypeScript test suite.
