@@ -362,6 +362,39 @@ Builds the per-project knowledge graph index. A single global `codegraph install
 
 That's it — your agent will use CodeGraph tools automatically when a `.codegraph/` directory exists.
 
+### Cloud-Native Multi-Repo Gateway
+
+Use the Kubernetes operator when you want one Codex MCP address for many repositories instead of one local `.codegraph/` index per workspace.
+
+```bash
+# Build a local runtime image for Rancher Desktop / local Kubernetes
+docker build -f deploy/operator/runtime.Containerfile -t codegraph-runtime:local .
+
+# Install the repository and gateway CRDs
+kubectl apply -f deploy/operator/config/crd/codegraph.dev_codegraphrepositories.yaml
+kubectl apply -f deploy/operator/config/crd/codegraph.dev_codegraphgateways.yaml
+
+# Run the operator locally while validating
+cd deploy/operator
+go run ./cmd/manager --route-mode=ingress --runtime-image=codegraph-runtime:local
+```
+
+Create one `CodeGraphRepository` per repo, then expose them through one `CodeGraphGateway`. The gateway runs `codegraph serve --mcp --http --gateway-repos ...`, aggregates backend tools as `<repoId>__<tool>`, and exposes one MCP endpoint:
+
+```text
+http://127.0.0.1/mcp
+```
+
+Codex `config.toml` needs one server entry:
+
+```toml
+[mcp_servers.codegraph_k8s]
+url = "http://127.0.0.1/mcp"
+enabled = true
+```
+
+For a local five-repo verification gateway, see `deploy/operator/config/samples/codegraphgateway-local-verify.yaml`. Full operator details are in `deploy/operator/README.md`.
+
 <details>
 <summary><strong>Manual Setup (Alternative)</strong></summary>
 
