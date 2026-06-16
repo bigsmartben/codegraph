@@ -51,6 +51,7 @@ func (r *CodeGraphRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.
 				Reason:  "UnsupportedRouteMode",
 				Message: err.Error(),
 			})
+			repo.SetCondition(indexedFalseCondition("UnsupportedRouteMode", err.Error()))
 		}); updateErr != nil {
 			return ctrl.Result{}, updateErr
 		}
@@ -85,13 +86,13 @@ func (r *CodeGraphRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	if err := r.ensure(ctx, &repo, resources.BuildDeployment(&repo, r.DefaultImage)); err != nil {
-		return r.markDegraded(ctx, &repo, "DeploymentApplyFailed", err)
+		return r.markDegradedWithIndexed(ctx, &repo, "DeploymentApplyFailed", err, indexedSucceededCondition())
 	}
 	deployment, found, err := r.getDeployment(ctx, &repo)
 	if err != nil {
-		return r.markDegraded(ctx, &repo, "DeploymentReadFailed", err)
+		return r.markDegradedWithIndexed(ctx, &repo, "DeploymentReadFailed", err, indexedSucceededCondition())
 	}
-	if !found || deployment.Status.AvailableReplicas == 0 {
+	if !found || !deploymentRuntimeReady(deployment) {
 		return r.markRuntimePending(ctx, &repo)
 	}
 	return r.markReady(ctx, &repo)
@@ -130,6 +131,18 @@ func jobTerminalFailed(job *batchv1.Job) bool {
 		}
 	}
 	return false
+}
+
+func deploymentRuntimeReady(deployment *appsv1.Deployment) bool {
+	desired := int32(1)
+	if deployment.Spec.Replicas != nil {
+		desired = *deployment.Spec.Replicas
+	}
+
+	return deployment.Status.ObservedGeneration >= deployment.Generation &&
+		deployment.Status.UpdatedReplicas >= desired &&
+		deployment.Status.AvailableReplicas >= desired &&
+		deployment.Status.UnavailableReplicas == 0
 }
 
 func (r *CodeGraphRepositoryReconciler) ensureRoute(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) error {
@@ -352,6 +365,10 @@ func setBaseStatus(repo *codegraphv1alpha1.CodeGraphRepository) {
 }
 
 func (r *CodeGraphRepositoryReconciler) markDegraded(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository, reason string, err error) (ctrl.Result, error) {
+	return r.markDegradedWithIndexed(ctx, repo, reason, err, indexedFalseCondition(reason, err.Error()))
+}
+
+func (r *CodeGraphRepositoryReconciler) markDegradedWithIndexed(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository, reason string, err error, indexed metav1.Condition) (ctrl.Result, error) {
 	if updateErr := r.patchStatus(ctx, repo, func() {
 		setBaseStatus(repo)
 		repo.Status.Phase = codegraphv1alpha1.PhaseDegraded
@@ -361,10 +378,29 @@ func (r *CodeGraphRepositoryReconciler) markDegraded(ctx context.Context, repo *
 			Reason:  reason,
 			Message: err.Error(),
 		})
+		repo.SetCondition(indexed)
 	}); updateErr != nil {
 		return ctrl.Result{}, updateErr
 	}
 	return ctrl.Result{}, err
+}
+
+func indexedFalseCondition(reason string, message string) metav1.Condition {
+	return metav1.Condition{
+		Type:    codegraphv1alpha1.ConditionIndexed,
+		Status:  metav1.ConditionFalse,
+		Reason:  reason,
+		Message: message,
+	}
+}
+
+func indexedSucceededCondition() metav1.Condition {
+	return metav1.Condition{
+		Type:    codegraphv1alpha1.ConditionIndexed,
+		Status:  metav1.ConditionTrue,
+		Reason:  "IndexSucceeded",
+		Message: "sync/index job completed",
+	}
 }
 
 func (r *CodeGraphRepositoryReconciler) patchStatus(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository, mutate func()) error {

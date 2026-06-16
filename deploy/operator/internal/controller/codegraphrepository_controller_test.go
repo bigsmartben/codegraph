@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	codegraphv1alpha1 "github.com/colbymchenry/codegraph/deploy/operator/api/v1alpha1"
@@ -81,6 +82,10 @@ func TestReconcileMarksReadyWhenJobAndDeploymentAreReady(t *testing.T) {
 	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service"}, &deployment); err != nil {
 		t.Fatalf("get deployment: %v", err)
 	}
+	deployment.Generation = 2
+	if err := reconciler.Update(ctx, &deployment); err != nil {
+		t.Fatalf("update deployment generation: %v", err)
+	}
 	deployment.Status.AvailableReplicas = 1
 	if err := reconciler.Status().Update(ctx, &deployment); err != nil {
 		t.Fatalf("update deployment status: %v", err)
@@ -91,7 +96,70 @@ func TestReconcileMarksReadyWhenJobAndDeploymentAreReady(t *testing.T) {
 		t.Fatalf("third Reconcile() error = %v", err)
 	}
 
+	assertRepositoryRuntimePendingStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
+
+	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service"}, &deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	deployment.Status.ObservedGeneration = deployment.Generation
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.AvailableReplicas = 1
+	deployment.Status.UnavailableReplicas = 0
+	if err := reconciler.Status().Update(ctx, &deployment); err != nil {
+		t.Fatalf("update deployment ready status: %v", err)
+	}
+
+	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("fourth Reconcile() error = %v", err)
+	}
+
 	assertRepositoryReadyStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
+}
+
+func TestReconcilePreservesIndexSucceededWhenRuntimeApplyFails(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	reconciler := newTestReconciler(t, repo)
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("first Reconcile() error = %v", err)
+	}
+
+	var job batchv1.Job
+	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service-sync-1"}, &job); err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	job.Status.Succeeded = 1
+	if err := reconciler.Status().Update(ctx, &job); err != nil {
+		t.Fatalf("update job status: %v", err)
+	}
+
+	reconciler.Client = getDeploymentErrorClient{
+		Client: reconciler.Client,
+		err:    errors.New("deployment read failed"),
+	}
+	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err == nil {
+		t.Fatalf("second Reconcile() error = nil, want deployment error")
+	}
+
+	var updated codegraphv1alpha1.CodeGraphRepository
+	if err := reconciler.Client.Get(ctx, client.ObjectKeyFromObject(repo), &updated); err != nil {
+		t.Fatalf("get updated repo: %v", err)
+	}
+	if updated.Status.Phase != codegraphv1alpha1.PhaseDegraded {
+		t.Fatalf("phase = %q", updated.Status.Phase)
+	}
+	ready := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "DeploymentApplyFailed" {
+		t.Fatalf("Ready condition = %#v", ready)
+	}
+	indexed := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionIndexed)
+	if indexed == nil || indexed.Status != metav1.ConditionTrue || indexed.Reason != "IndexSucceeded" {
+		t.Fatalf("Indexed condition = %#v", indexed)
+	}
 }
 
 func TestReconcileMarksDegradedWhenJobFails(t *testing.T) {
@@ -305,6 +373,42 @@ func TestReconcileMarksUnsupportedRouteModeDegraded(t *testing.T) {
 	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "UnsupportedRouteMode" {
 		t.Fatalf("Ready condition = %#v", ready)
 	}
+}
+
+func TestMarkDegradedClearsStaleIndexedCondition(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	reconciler := newTestReconciler(t, repo)
+
+	if _, err := reconciler.markRuntimePending(ctx, repo); err != nil {
+		t.Fatalf("markRuntimePending() error = %v", err)
+	}
+
+	wantErr := errors.New("pvc apply failed")
+	if _, err := reconciler.markDegraded(ctx, repo, "PVCApplyFailed", wantErr); err != wantErr {
+		t.Fatalf("markDegraded() error = %v, want %v", err, wantErr)
+	}
+
+	var updated codegraphv1alpha1.CodeGraphRepository
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(repo), &updated); err != nil {
+		t.Fatalf("get updated repo: %v", err)
+	}
+	indexed := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionIndexed)
+	if indexed == nil || indexed.Status != metav1.ConditionFalse || indexed.Reason != "PVCApplyFailed" {
+		t.Fatalf("Indexed condition = %#v", indexed)
+	}
+}
+
+type getDeploymentErrorClient struct {
+	client.Client
+	err error
+}
+
+func (c getDeploymentErrorClient) Get(ctx context.Context, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+	if _, ok := object.(*appsv1.Deployment); ok {
+		return c.err
+	}
+	return c.Client.Get(ctx, key, object, opts...)
 }
 
 func newTestReconciler(t *testing.T, objects ...client.Object) *CodeGraphRepositoryReconciler {
