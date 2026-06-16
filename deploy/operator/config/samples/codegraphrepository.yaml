@@ -1,0 +1,19 @@
+apiVersion: codegraph.dev/v1alpha1
+kind: CodeGraphRepository
+metadata:
+  name: api-service
+  namespace: codegraph
+spec:
+  repoId: api-service
+  git:
+    url: https://github.com/example/api-service.git
+    ref: main
+    authSecretRef:
+      name: api-service-git-auth
+  mcp:
+    host: codegraph.example.com
+    path: /mcp/api-service
+  storage:
+    size: 20Gi
+  sync:
+    mode: manual
