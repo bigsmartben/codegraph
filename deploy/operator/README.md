@@ -80,12 +80,11 @@ go test ./...
 go run ./cmd/manager --route-mode=gateway --gateway-name=codegraph
 ```
 
-On Windows, run manifest generation with the pinned Go binary used by the project workspace:
+On Windows PowerShell, install Go and ensure `go` is on `PATH`, then run the same commands with PowerShell quoting:
 
 ```powershell
-$env:Path = "C:\Users\24598\.cache\codex\go1.23.12\go\bin;$env:Path"
-C:\Users\24598\.cache\codex\go1.23.12\go\bin\go.exe run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2 crd:allowDangerousTypes=true paths=./api/v1alpha1 output:crd:artifacts:config=config/crd
-C:\Users\24598\.cache\codex\go1.23.12\go\bin\go.exe test ./...
+go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2 crd:allowDangerousTypes=true paths="./api/..." output:crd:artifacts:config=config/crd
+go test ./...
 ```
 
 Useful local checks:
