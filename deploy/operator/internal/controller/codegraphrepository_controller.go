@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -41,10 +42,22 @@ func (r *CodeGraphRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 	if !r.supportsRouteMode() {
 		err := fmt.Errorf("unsupported route mode %q", r.RouteMode)
-		return r.markDegraded(ctx, &repo, "UnsupportedRouteMode", err)
+		if updateErr := r.patchStatus(ctx, &repo, func() {
+			repo.Status.ObservedGeneration = repo.Generation
+			repo.Status.Phase = codegraphv1alpha1.PhaseDegraded
+			repo.SetCondition(metav1.Condition{
+				Type:    codegraphv1alpha1.ConditionReady,
+				Status:  metav1.ConditionFalse,
+				Reason:  "UnsupportedRouteMode",
+				Message: err.Error(),
+			})
+		}); updateErr != nil {
+			return ctrl.Result{}, updateErr
+		}
+		return ctrl.Result{}, nil
 	}
 
-	if err := r.ensure(ctx, &repo, resources.BuildPVC(&repo)); err != nil {
+	if err := r.ensurePVC(ctx, &repo, resources.BuildPVC(&repo)); err != nil {
 		return r.markDegraded(ctx, &repo, "PVCApplyFailed", err)
 	}
 	if err := r.ensureJob(ctx, &repo, resources.BuildSyncJob(&repo, r.DefaultImage)); err != nil {
@@ -63,11 +76,17 @@ func (r *CodeGraphRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.
 func (r *CodeGraphRepositoryReconciler) ensureRoute(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) error {
 	switch r.RouteMode {
 	case "", "gateway":
+		if err := r.deleteIfExists(ctx, resources.BuildIngress(repo)); err != nil {
+			return err
+		}
 		return r.ensure(ctx, repo, resources.BuildHTTPRoute(repo, resources.RouteConfig{
 			GatewayName:      r.gatewayName(),
 			GatewayNamespace: r.GatewayNamespace,
 		}))
 	case "ingress":
+		if err := r.deleteIfExists(ctx, resources.BuildHTTPRoute(repo, resources.RouteConfig{})); err != nil {
+			return err
+		}
 		return r.ensure(ctx, repo, resources.BuildIngress(repo))
 	default:
 		return fmt.Errorf("unsupported route mode %q", r.RouteMode)
@@ -88,6 +107,24 @@ func (r *CodeGraphRepositoryReconciler) gatewayName() string {
 		return r.GatewayName
 	}
 	return defaultGatewayName
+}
+
+func (r *CodeGraphRepositoryReconciler) ensurePVC(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository, desired *corev1.PersistentVolumeClaim) error {
+	if err := controllerutil.SetControllerReference(repo, desired, r.Scheme); err != nil {
+		return err
+	}
+
+	var current corev1.PersistentVolumeClaim
+	err := r.Get(ctx, client.ObjectKeyFromObject(desired), &current)
+	if apierrors.IsNotFound(err) {
+		return r.Create(ctx, desired)
+	}
+	if err != nil {
+		return err
+	}
+
+	applyObjectMeta(&current, desired)
+	return r.Update(ctx, &current)
 }
 
 func (r *CodeGraphRepositoryReconciler) ensureJob(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository, desired *batchv1.Job) error {
@@ -122,6 +159,14 @@ func (r *CodeGraphRepositoryReconciler) ensure(ctx context.Context, repo *codegr
 	return r.Update(ctx, current)
 }
 
+func (r *CodeGraphRepositoryReconciler) deleteIfExists(ctx context.Context, object client.Object) error {
+	err := r.Delete(ctx, object)
+	if apierrors.IsNotFound(err) || apiMeta.IsNoMatchError(err) {
+		return nil
+	}
+	return err
+}
+
 func applyObjectMeta(current client.Object, desired client.Object) {
 	current.SetLabels(desired.GetLabels())
 	current.SetAnnotations(desired.GetAnnotations())
@@ -130,8 +175,6 @@ func applyObjectMeta(current client.Object, desired client.Object) {
 
 func applyObjectSpec(current client.Object, desired client.Object) {
 	switch current := current.(type) {
-	case *corev1.PersistentVolumeClaim:
-		current.Spec = desired.(*corev1.PersistentVolumeClaim).Spec
 	case *corev1.Service:
 		clusterIP := current.Spec.ClusterIP
 		clusterIPs := current.Spec.ClusterIPs
@@ -152,54 +195,67 @@ func applyObjectSpec(current client.Object, desired client.Object) {
 }
 
 func (r *CodeGraphRepositoryReconciler) markPending(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) (ctrl.Result, error) {
-	names := resources.NamesFor(repo)
-	repo.Status.ObservedGeneration = repo.Generation
-	repo.Status.Phase = codegraphv1alpha1.PhasePending
-	repo.Status.Endpoint = repo.Endpoint()
-	repo.Status.ServiceName = names.Service
-	repo.Status.RouteName = names.Route
-	repo.SetCondition(metav1.Condition{
-		Type:    codegraphv1alpha1.ConditionReady,
-		Status:  metav1.ConditionFalse,
-		Reason:  "ResourcesApplied",
-		Message: "waiting for sync/index job to complete",
-	})
-	repo.SetCondition(metav1.Condition{
-		Type:    codegraphv1alpha1.ConditionIndexed,
-		Status:  metav1.ConditionFalse,
-		Reason:  "IndexRunning",
-		Message: "waiting for sync/index job to complete",
-	})
-
-	if err := r.Status().Update(ctx, repo); err != nil {
+	if err := r.patchStatus(ctx, repo, func() {
+		names := resources.NamesFor(repo)
+		repo.Status.ObservedGeneration = repo.Generation
+		repo.Status.Phase = codegraphv1alpha1.PhasePending
+		repo.Status.Endpoint = repo.Endpoint()
+		repo.Status.ServiceName = names.Service
+		repo.Status.RouteName = names.Route
+		repo.SetCondition(metav1.Condition{
+			Type:    codegraphv1alpha1.ConditionReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  "ResourcesApplied",
+			Message: "waiting for sync/index job to complete",
+		})
+		repo.SetCondition(metav1.Condition{
+			Type:    codegraphv1alpha1.ConditionIndexed,
+			Status:  metav1.ConditionFalse,
+			Reason:  "IndexRunning",
+			Message: "waiting for sync/index job to complete",
+		})
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
 }
 
 func (r *CodeGraphRepositoryReconciler) markDegraded(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository, reason string, err error) (ctrl.Result, error) {
-	repo.Status.ObservedGeneration = repo.Generation
-	repo.Status.Phase = codegraphv1alpha1.PhaseDegraded
-	repo.SetCondition(metav1.Condition{
-		Type:    codegraphv1alpha1.ConditionReady,
-		Status:  metav1.ConditionFalse,
-		Reason:  reason,
-		Message: err.Error(),
-	})
-	if updateErr := r.Status().Update(ctx, repo); updateErr != nil {
+	if updateErr := r.patchStatus(ctx, repo, func() {
+		repo.Status.ObservedGeneration = repo.Generation
+		repo.Status.Phase = codegraphv1alpha1.PhaseDegraded
+		repo.SetCondition(metav1.Condition{
+			Type:    codegraphv1alpha1.ConditionReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  reason,
+			Message: err.Error(),
+		})
+	}); updateErr != nil {
 		return ctrl.Result{}, updateErr
 	}
 	return ctrl.Result{}, err
 }
 
+func (r *CodeGraphRepositoryReconciler) patchStatus(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository, mutate func()) error {
+	base := repo.DeepCopy()
+	mutate()
+	return r.Status().Patch(ctx, repo, client.MergeFrom(base))
+}
+
 func (r *CodeGraphRepositoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&codegraphv1alpha1.CodeGraphRepository{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.Job{}).
 		Owns(&appsv1.Deployment{}).
-		Owns(&corev1.Service{}).
-		Owns(&networkingv1.Ingress{}).
-		Owns(&gatewayv1.HTTPRoute{}).
-		Complete(r)
+		Owns(&corev1.Service{})
+
+	switch r.RouteMode {
+	case "ingress":
+		builder = builder.Owns(&networkingv1.Ingress{})
+	default:
+		builder = builder.Owns(&gatewayv1.HTTPRoute{})
+	}
+
+	return builder.Complete(r)
 }

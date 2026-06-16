@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 
 	codegraphv1alpha1 "github.com/colbymchenry/codegraph/deploy/operator/api/v1alpha1"
@@ -46,6 +47,10 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOptions)))
+	if err := validateRouteMode(routeMode); err != nil {
+		ctrl.Log.Error(err, "invalid route mode")
+		os.Exit(1)
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
@@ -84,5 +89,14 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		ctrl.Log.Error(err, "problem running manager")
 		os.Exit(1)
+	}
+}
+
+func validateRouteMode(routeMode string) error {
+	switch routeMode {
+	case "", "gateway", "ingress":
+		return nil
+	default:
+		return fmt.Errorf("route-mode must be gateway or ingress, got %q", routeMode)
 	}
 }

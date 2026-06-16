@@ -71,6 +71,103 @@ func TestReconcileCreatesIngressWhenConfigured(t *testing.T) {
 	assertRepositoryPendingStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
 }
 
+func TestReconcilePreservesExistingPVCSpec(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	storageClass := "fast"
+	existing := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "codegraph-api-service",
+			Namespace: "default",
+			Labels: map[string]string{
+				"stale": "true",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			StorageClassName: &storageClass,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("5Gi"),
+				},
+			},
+		},
+	}
+	reconciler := newTestReconciler(t, repo, existing)
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	var pvc corev1.PersistentVolumeClaim
+	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: "default", Name: "codegraph-api-service"}, &pvc); err != nil {
+		t.Fatalf("get pvc: %v", err)
+	}
+	if got := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; got.Cmp(resource.MustParse("5Gi")) != 0 {
+		t.Fatalf("PVC storage request = %s, want 5Gi", got.String())
+	}
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "fast" {
+		t.Fatalf("PVC storageClassName = %v", pvc.Spec.StorageClassName)
+	}
+	if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteMany {
+		t.Fatalf("PVC accessModes = %#v", pvc.Spec.AccessModes)
+	}
+	if pvc.Labels["codegraph.dev/repo-id"] != "api-service" || pvc.Labels["stale"] != "" {
+		t.Fatalf("PVC labels = %#v", pvc.Labels)
+	}
+	assertOwnedByRepository(t, pvc.OwnerReferences, repo)
+}
+
+func TestReconcileGatewayRouteDeletesExistingIngress(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	existingIngress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "codegraph-api-service",
+			Namespace: "default",
+		},
+	}
+	reconciler := newTestReconciler(t, repo, existingIngress)
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	assertExistsAndOwned(t, ctx, reconciler.Client, &gatewayv1.HTTPRoute{}, repo, "codegraph-api-service")
+	var ingress networkingv1.Ingress
+	err = reconciler.Get(ctx, types.NamespacedName{Namespace: "default", Name: "codegraph-api-service"}, &ingress)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("Ingress get error = %v, want NotFound", err)
+	}
+}
+
+func TestReconcileIngressDeletesExistingHTTPRoute(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	existingRoute := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "codegraph-api-service",
+			Namespace: "default",
+		},
+	}
+	reconciler := newTestReconciler(t, repo, existingRoute)
+	reconciler.RouteMode = "ingress"
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	assertExistsAndOwned(t, ctx, reconciler.Client, &networkingv1.Ingress{}, repo, "codegraph-api-service")
+	var route gatewayv1.HTTPRoute
+	err = reconciler.Get(ctx, types.NamespacedName{Namespace: "default", Name: "codegraph-api-service"}, &route)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("HTTPRoute get error = %v, want NotFound", err)
+	}
+}
+
 func TestReconcileMarksUnsupportedRouteModeDegraded(t *testing.T) {
 	ctx := context.Background()
 	repo := controllerRepository()
@@ -78,8 +175,8 @@ func TestReconcileMarksUnsupportedRouteModeDegraded(t *testing.T) {
 	reconciler.RouteMode = "mesh"
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
-	if err == nil {
-		t.Fatalf("Reconcile() error = nil, want unsupported route mode error")
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
 
 	var updated codegraphv1alpha1.CodeGraphRepository
@@ -176,6 +273,20 @@ func assertExistsAndOwned(t *testing.T, ctx context.Context, c client.Client, ob
 		t.Fatalf("%T owner controller = %v", object, owner.Controller)
 	}
 	return object
+}
+
+func assertOwnedByRepository(t *testing.T, owners []metav1.OwnerReference, repo *codegraphv1alpha1.CodeGraphRepository) {
+	t.Helper()
+	if len(owners) != 1 {
+		t.Fatalf("ownerReferences = %#v", owners)
+	}
+	owner := owners[0]
+	if owner.APIVersion != codegraphv1alpha1.GroupVersion.String() || owner.Kind != "CodeGraphRepository" || owner.Name != repo.Name || owner.UID != repo.UID {
+		t.Fatalf("owner reference = %#v", owner)
+	}
+	if owner.Controller == nil || !*owner.Controller {
+		t.Fatalf("owner controller = %v", owner.Controller)
+	}
 }
 
 func assertRepositoryPendingStatus(t *testing.T, ctx context.Context, c client.Client, repo *codegraphv1alpha1.CodeGraphRepository, serviceName string, routeName string) {
