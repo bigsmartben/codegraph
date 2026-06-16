@@ -52,6 +52,30 @@ func TestReconcileCreatesRepositoryResourcesWithGatewayRoute(t *testing.T) {
 	assertRepositoryIndexingStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
 }
 
+func TestReconcileMarksDegradedWhenRuntimeImageMissing(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	reconciler := newTestReconciler(t, repo)
+	reconciler.DefaultImage = ""
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	var pvc corev1.PersistentVolumeClaim
+	err = reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service"}, &pvc)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("pvc get error = %v, want NotFound", err)
+	}
+	var job batchv1.Job
+	err = reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service-sync-1"}, &job)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("sync job get error = %v, want NotFound", err)
+	}
+	assertRepositoryRuntimeImageMissingStatus(t, ctx, reconciler.Client, repo)
+}
+
 func TestReconcileMarksReadyWhenJobAndDeploymentAreReady(t *testing.T) {
 	ctx := context.Background()
 	repo := controllerRepository()
@@ -843,6 +867,29 @@ func assertRepositoryRuntimeShutdownStatus(t *testing.T, ctx context.Context, c 
 	}
 	indexed := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionIndexed)
 	if indexed == nil || indexed.Status != metav1.ConditionFalse || indexed.Reason != "RuntimeShutdown" {
+		t.Fatalf("Indexed condition = %#v", indexed)
+	}
+}
+
+func assertRepositoryRuntimeImageMissingStatus(t *testing.T, ctx context.Context, c client.Client, repo *codegraphv1alpha1.CodeGraphRepository) {
+	t.Helper()
+
+	var updated codegraphv1alpha1.CodeGraphRepository
+	if err := c.Get(ctx, client.ObjectKeyFromObject(repo), &updated); err != nil {
+		t.Fatalf("get updated repo: %v", err)
+	}
+	if updated.Status.ObservedGeneration != repo.Generation {
+		t.Fatalf("observedGeneration = %d", updated.Status.ObservedGeneration)
+	}
+	if updated.Status.Phase != codegraphv1alpha1.PhaseDegraded {
+		t.Fatalf("phase = %q", updated.Status.Phase)
+	}
+	ready := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "RuntimeImageMissing" {
+		t.Fatalf("Ready condition = %#v", ready)
+	}
+	indexed := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionIndexed)
+	if indexed == nil || indexed.Status != metav1.ConditionFalse || indexed.Reason != "RuntimeImageMissing" {
 		t.Fatalf("Indexed condition = %#v", indexed)
 	}
 }

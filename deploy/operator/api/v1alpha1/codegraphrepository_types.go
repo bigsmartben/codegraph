@@ -43,7 +43,8 @@ type CodeGraphRepositorySpec struct {
 	// +kubebuilder:default={mode:manual}
 	Sync SyncSpec `json:"sync,omitempty"`
 
-	// Image overrides the operator default CodeGraph runtime image.
+	// Image overrides the operator default CodeGraph runtime image. Set this when the controller was not started with --runtime-image.
+	// +kubebuilder:validation:MinLength=1
 	// +optional
 	Image string `json:"image,omitempty"`
 

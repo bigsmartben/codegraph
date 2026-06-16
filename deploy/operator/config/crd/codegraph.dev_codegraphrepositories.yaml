@@ -1001,7 +1001,8 @@ spec:
                 type: object
               image:
                 description: Image overrides the operator default CodeGraph runtime
-                  image.
+                  image. Set this when the controller was not started with --runtime-image.
+                minLength: 1
                 type: string
               mcp:
                 properties:

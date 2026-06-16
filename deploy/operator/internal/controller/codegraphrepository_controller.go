@@ -64,6 +64,9 @@ func (r *CodeGraphRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.
 	if !repo.MCPPathMatchesRepoID() {
 		return r.markInvalidMCPPath(ctx, &repo)
 	}
+	if repo.RuntimeImage(r.DefaultImage) == "" {
+		return r.markMissingRuntimeImage(ctx, &repo)
+	}
 
 	if err := r.ensurePVC(ctx, &repo, resources.BuildPVC(&repo)); err != nil {
 		return r.markDegraded(ctx, &repo, "PVCApplyFailed", err)
@@ -437,6 +440,24 @@ func (r *CodeGraphRepositoryReconciler) markInvalidMCPPath(ctx context.Context, 
 			Message: message,
 		})
 		repo.SetCondition(indexedFalseCondition("InvalidMCPPath", message))
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *CodeGraphRepositoryReconciler) markMissingRuntimeImage(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) (ctrl.Result, error) {
+	message := "set spec.image or start the controller with --runtime-image"
+	if err := r.patchStatus(ctx, repo, func() {
+		setBaseStatus(repo)
+		repo.Status.Phase = codegraphv1alpha1.PhaseDegraded
+		repo.SetCondition(metav1.Condition{
+			Type:    codegraphv1alpha1.ConditionReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  "RuntimeImageMissing",
+			Message: message,
+		})
+		repo.SetCondition(indexedFalseCondition("RuntimeImageMissing", message))
 	}); err != nil {
 		return ctrl.Result{}, err
 	}

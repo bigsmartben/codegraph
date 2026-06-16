@@ -1,0 +1,7 @@
+.git
+.codegraph
+.worktrees
+node_modules
+dist
+npm-debug.log
+coverage

@@ -5,6 +5,7 @@ metadata:
   namespace: codegraph
 spec:
   repoId: api-service
+  image: registry.example.com/codegraph-runtime:1.0.1
   git:
     url: https://github.com/example/api-service.git
     ref: main

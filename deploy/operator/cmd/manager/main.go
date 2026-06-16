@@ -42,7 +42,7 @@ func main() {
 	flag.StringVar(&routeMode, "route-mode", "gateway", "Routing mode: gateway or ingress.")
 	flag.StringVar(&gatewayName, "gateway-name", "codegraph", "Gateway name used when route-mode=gateway.")
 	flag.StringVar(&gatewayNamespace, "gateway-namespace", "", "Gateway namespace used when route-mode=gateway. Defaults to each repository namespace.")
-	flag.StringVar(&runtimeImage, "runtime-image", "ghcr.io/colbymchenry/codegraph:latest", "Default CodeGraph runtime image.")
+	flag.StringVar(&runtimeImage, "runtime-image", "", "Default CodeGraph runtime image used when spec.image is omitted.")
 	zapOptions.BindFlags(flag.CommandLine)
 	flag.Parse()
 

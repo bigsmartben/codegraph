@@ -12,6 +12,23 @@ For each `CodeGraphRepository`, the operator owns:
 
 The first operator version does not run a Python proxy. The runtime Deployment reuses the existing CodeGraph HTTP MCP server directly with `codegraph serve --mcp --http`.
 
+## Runtime image
+
+The sync Job and runtime Deployment use the same CodeGraph runtime image. Build and push that image from the repository root:
+
+```sh
+docker build -f deploy/operator/runtime.Containerfile -t registry.example.com/codegraph-runtime:1.0.1 .
+docker push registry.example.com/codegraph-runtime:1.0.1
+```
+
+Then either set `spec.image` on each `CodeGraphRepository`, or start the controller with a cluster-wide default:
+
+```sh
+go run ./cmd/manager --runtime-image=registry.example.com/codegraph-runtime:1.0.1
+```
+
+If neither `spec.image` nor `--runtime-image` is set, the controller marks the repository `Degraded` with reason `RuntimeImageMissing` and does not create the PVC or sync Job.
+
 ## MCP endpoint
 
 All repositories share one external MCP host and use per-repository paths:
@@ -39,7 +56,7 @@ kubectl apply -f config/samples/codegraphrepository.yaml
 kubectl -n codegraph get codegraphrepository api-service
 ```
 
-The sample uses manual sync, a 20Gi PVC, and a Git authentication secret reference.
+The sample uses manual sync, a 20Gi PVC, an explicit runtime image, and a Git authentication secret reference. Replace the image with the registry tag you built and pushed.
 
 ## Status fields
 
@@ -75,20 +92,22 @@ The controller supports two routing modes:
 
 Both modes expose the CR's `spec.mcp.host` and `spec.mcp.path`, then rewrite the external `/mcp/<repoId>` path to the pod-local `/mcp` endpoint.
 
+Gateway mode requires the Gateway API CRDs to be installed and a compatible `Gateway` that allows `HTTPRoute` attachment from the repository namespace. Ingress mode assumes an nginx ingress controller that honors the rewrite annotations emitted by the operator.
+
 ## Local development
 
 From `deploy/operator`:
 
 ```sh
-go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2 crd:allowDangerousTypes=true paths="./api/v1alpha1" output:crd:artifacts:config=config/crd
+go run sigs.k8s.io/controller-tools/cmd/controller-gen crd:allowDangerousTypes=true paths="./api/v1alpha1" output:crd:artifacts:config=config/crd
 go test ./...
-go run ./cmd/manager --route-mode=gateway --gateway-name=codegraph
+go run ./cmd/manager --route-mode=gateway --gateway-name=codegraph --runtime-image=registry.example.com/codegraph-runtime:1.0.1
 ```
 
 On Windows PowerShell, install Go and ensure `go` is on `PATH`, then run the same commands with PowerShell quoting:
 
 ```powershell
-go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2 crd:allowDangerousTypes=true paths="./api/v1alpha1" output:crd:artifacts:config=config/crd
+go run sigs.k8s.io/controller-tools/cmd/controller-gen crd:allowDangerousTypes=true paths="./api/v1alpha1" output:crd:artifacts:config=config/crd
 go test ./...
 ```
 

@@ -70,6 +70,14 @@ func TestDefaultImageUsesFallbackWhenSpecImageEmpty(t *testing.T) {
 	}
 }
 
+func TestDefaultImageCanBeEmptyWhenImageUnset(t *testing.T) {
+	repo := &CodeGraphRepository{}
+
+	if got := repo.RuntimeImage(""); got != "" {
+		t.Fatalf("RuntimeImage() = %q", got)
+	}
+}
+
 func TestSetConditionReplacesSameType(t *testing.T) {
 	repo := &CodeGraphRepository{}
 	repo.SetCondition(metav1.Condition{
