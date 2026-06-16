@@ -145,6 +145,66 @@ func TestReconcileDeletesStaleRuntimeBeforeCreatingNextGenerationSyncJob(t *test
 	assertRepositoryRuntimeShutdownStatus(t, ctx, reconciler.Client, repo)
 }
 
+func TestReconcileBlocksNextGenerationSyncWhileStaleRuntimePodExists(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	repo.Generation = 2
+	staleRuntimePod := runtimePod(repo, "codegraph-api-service-stale", "1")
+	staleRuntimePod.DeletionTimestamp = &metav1.Time{Time: time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC)}
+	staleRuntimePod.Finalizers = []string{"codegraph.dev/test-finalizer"}
+	reconciler := newTestReconciler(t, repo, staleRuntimePod)
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	var job batchv1.Job
+	err = reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service-sync-2"}, &job)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("sync job get error = %v, want NotFound", err)
+	}
+	assertRepositoryRuntimeShutdownStatus(t, ctx, reconciler.Client, repo)
+}
+
+func TestReconcileCreatesNextGenerationSyncWhenRuntimePodsAreCurrent(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	repo.Generation = 2
+	currentRuntimePod := runtimePod(repo, "codegraph-api-service-current", "2")
+	reconciler := newTestReconciler(t, repo, currentRuntimePod)
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	assertExistsAndOwned(t, ctx, reconciler.Client, &batchv1.Job{}, repo, "codegraph-api-service-sync-2")
+	assertRepositoryIndexingStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
+}
+
+func TestReconcileKeepsIndexingWhenCurrentSyncJobPodExists(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	repo.Generation = 2
+	currentJob := resources.BuildSyncJob(repo, "ghcr.io/acme/codegraph:runtime")
+	currentJobPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "codegraph-api-service-sync-2-pod",
+			Namespace: repo.Namespace,
+			Labels:    resources.LabelsFor(repo),
+		},
+	}
+	reconciler := newTestReconciler(t, repo, currentJob, currentJobPod)
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	assertRepositoryIndexingStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
+}
+
 func TestReconcileAllowsDeploymentRefreshAfterCurrentGenerationJobSucceeded(t *testing.T) {
 	ctx := context.Background()
 	repo := controllerRepository()
@@ -169,9 +229,10 @@ func TestReconcileAllowsDeploymentRefreshAfterCurrentGenerationJobSucceeded(t *t
 	}
 }
 
-func TestReconcileRecordsResolvedRefAndLastSyncTimeFromSucceededJob(t *testing.T) {
+func TestReconcileRecordsRequestedRefAndLastSyncTimeFromSucceededJob(t *testing.T) {
 	ctx := context.Background()
 	repo := controllerRepository()
+	repo.Spec.Git.Ref = "release/2026-06"
 	reconciler := newTestReconciler(t, repo)
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
@@ -183,10 +244,6 @@ func TestReconcileRecordsResolvedRefAndLastSyncTimeFromSucceededJob(t *testing.T
 	var job batchv1.Job
 	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service-sync-1"}, &job); err != nil {
 		t.Fatalf("get job: %v", err)
-	}
-	job.Annotations = map[string]string{resources.ResolvedRefAnnotation: "abc123def456"}
-	if err := reconciler.Update(ctx, &job); err != nil {
-		t.Fatalf("update job metadata: %v", err)
 	}
 	job.Status.Succeeded = 1
 	job.Status.CompletionTime = &completion
@@ -203,7 +260,7 @@ func TestReconcileRecordsResolvedRefAndLastSyncTimeFromSucceededJob(t *testing.T
 	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(repo), &updated); err != nil {
 		t.Fatalf("get updated repo: %v", err)
 	}
-	if updated.Status.ResolvedRef != "abc123def456" {
+	if updated.Status.ResolvedRef != "release/2026-06" {
 		t.Fatalf("resolvedRef = %q", updated.Status.ResolvedRef)
 	}
 	if updated.Status.LastSyncTime == nil || !completion.Equal(updated.Status.LastSyncTime) {
@@ -604,6 +661,17 @@ func controllerRepository() *codegraphv1alpha1.CodeGraphRepository {
 			Storage: codegraphv1alpha1.StorageSpec{
 				Size: resource.MustParse("20Gi"),
 			},
+		},
+	}
+}
+
+func runtimePod(repo *codegraphv1alpha1.CodeGraphRepository, name string, generation string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   repo.Namespace,
+			Labels:      resources.SelectorFor(repo),
+			Annotations: map[string]string{resources.RepositoryGenerationAnnotation: generation},
 		},
 	}
 }

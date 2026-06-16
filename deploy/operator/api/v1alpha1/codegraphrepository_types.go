@@ -111,12 +111,13 @@ type CodeGraphRepositoryStatus struct {
 	Phase              string `json:"phase,omitempty"`
 	// +listType=map
 	// +listMapKey=type
-	Conditions   []metav1.Condition `json:"conditions,omitempty"`
-	ResolvedRef  string             `json:"resolvedRef,omitempty"`
-	LastSyncTime *metav1.Time       `json:"lastSyncTime,omitempty"`
-	Endpoint     string             `json:"endpoint,omitempty"`
-	ServiceName  string             `json:"serviceName,omitempty"`
-	RouteName    string             `json:"routeName,omitempty"`
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// ResolvedRef is the requested spec.git.ref observed by the latest completed sync in this first version; it is not a resolved commit SHA.
+	ResolvedRef  string       `json:"resolvedRef,omitempty"`
+	LastSyncTime *metav1.Time `json:"lastSyncTime,omitempty"`
+	Endpoint     string       `json:"endpoint,omitempty"`
+	ServiceName  string       `json:"serviceName,omitempty"`
+	RouteName    string       `json:"routeName,omitempty"`
 }
 
 // +kubebuilder:object:root=true

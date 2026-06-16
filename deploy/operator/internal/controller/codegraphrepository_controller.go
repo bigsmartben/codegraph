@@ -158,13 +158,20 @@ func deploymentRepositoryGeneration(deployment *appsv1.Deployment) string {
 	return deployment.Spec.Template.Annotations[resources.RepositoryGenerationAnnotation]
 }
 
+func podRepositoryGeneration(pod corev1.Pod) string {
+	if pod.Annotations == nil {
+		return ""
+	}
+	return pod.Annotations[resources.RepositoryGenerationAnnotation]
+}
+
 func (r *CodeGraphRepositoryReconciler) shutdownStaleRuntimeBeforeSync(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) (ctrl.Result, bool, error) {
-	job, jobFound, err := r.getSyncJob(ctx, repo)
+	_, jobFound, err := r.getSyncJob(ctx, repo)
 	if err != nil {
 		result, markErr := r.markDegraded(ctx, repo, "SyncJobReadFailed", err)
 		return result, true, markErr
 	}
-	if jobFound && job.Status.Succeeded > 0 {
+	if jobFound {
 		return ctrl.Result{}, false, nil
 	}
 
@@ -173,16 +180,28 @@ func (r *CodeGraphRepositoryReconciler) shutdownStaleRuntimeBeforeSync(ctx conte
 		result, markErr := r.markDegraded(ctx, repo, "DeploymentReadFailed", err)
 		return result, true, markErr
 	}
-	if !found || deploymentRepositoryGeneration(deployment) == fmt.Sprintf("%d", repo.Generation) {
-		return ctrl.Result{}, false, nil
+	currentGeneration := fmt.Sprintf("%d", repo.Generation)
+	if found && deploymentRepositoryGeneration(deployment) != currentGeneration {
+		if err := r.Delete(ctx, deployment); err != nil && !apierrors.IsNotFound(err) {
+			result, markErr := r.markDegraded(ctx, repo, "DeploymentDeleteFailed", err)
+			return result, true, markErr
+		}
+		result, err := r.markIndexWaiting(ctx, repo, codegraphv1alpha1.PhasePending, "RuntimeShutdown", "waiting for stale runtime deployment to stop before syncing")
+		return result, true, err
 	}
 
-	if err := r.Delete(ctx, deployment); err != nil && !apierrors.IsNotFound(err) {
-		result, markErr := r.markDegraded(ctx, repo, "DeploymentDeleteFailed", err)
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(repo.Namespace), client.MatchingLabels(resources.SelectorFor(repo))); err != nil {
+		result, markErr := r.markDegraded(ctx, repo, "RuntimePodsReadFailed", err)
 		return result, true, markErr
 	}
-	result, err := r.markIndexWaiting(ctx, repo, codegraphv1alpha1.PhasePending, "RuntimeShutdown", "waiting for stale runtime deployment to stop before syncing")
-	return result, true, err
+	for _, pod := range pods.Items {
+		if podRepositoryGeneration(pod) != currentGeneration {
+			result, err := r.markIndexWaiting(ctx, repo, codegraphv1alpha1.PhasePending, "RuntimeShutdown", "waiting for stale runtime pods to stop before syncing")
+			return result, true, err
+		}
+	}
+	return ctrl.Result{}, false, nil
 }
 
 func (r *CodeGraphRepositoryReconciler) ensureRoute(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) error {
@@ -430,9 +449,6 @@ func setSucceededSyncStatus(repo *codegraphv1alpha1.CodeGraphRepository, job *ba
 	repo.Status.ResolvedRef = repo.Spec.Git.Ref
 	if job == nil {
 		return
-	}
-	if job.Annotations != nil && job.Annotations[resources.ResolvedRefAnnotation] != "" {
-		repo.Status.ResolvedRef = job.Annotations[resources.ResolvedRefAnnotation]
 	}
 	if job.Status.CompletionTime != nil {
 		repo.Status.LastSyncTime = job.Status.CompletionTime.DeepCopy()

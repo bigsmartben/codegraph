@@ -1235,6 +1235,9 @@ spec:
               phase:
                 type: string
               resolvedRef:
+                description: ResolvedRef is the requested spec.git.ref observed by
+                  the latest completed sync in this first version; it is not a resolved
+                  commit SHA.
                 type: string
               routeName:
                 type: string

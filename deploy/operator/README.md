@@ -41,6 +41,10 @@ kubectl -n codegraph get codegraphrepository api-service
 
 The sample uses manual sync, a 20Gi PVC, and a Git authentication secret reference.
 
+## Status fields
+
+`status.resolvedRef` records the requested `spec.git.ref` observed by the latest completed sync in this first operator version. It is not a resolved commit SHA. `status.lastSyncTime` records the sync Job completion time.
+
 ## Git authentication
 
 `spec.git.authSecretRef` points to an optional Kubernetes Secret in the same namespace as the `CodeGraphRepository`.
