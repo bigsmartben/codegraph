@@ -4,7 +4,7 @@
 
 **Goal:** Build a Kubernetes `CodeGraphRepository` CRD and controller that declaratively clones, indexes, serves, and routes repository-scoped CodeGraph HTTP MCP servers behind one shared path-based MCP address.
 
-**Architecture:** Add a self-contained Go operator under `deploy/operator/` so the existing TypeScript/Node CLI and MCP server remain untouched. The operator reconciles one custom resource into PVC, sync/index Job, Deployment, Service, and either Gateway API `HTTPRoute` or Kubernetes `Ingress`. Resource builder functions are tested without a cluster first; controller reconciliation is then tested with controller-runtime's fake/envtest clients.
+**Architecture:** Add a self-contained Go operator under `deploy/operator/` so the existing TypeScript/Node CLI and MCP server remain untouched. The operator reconciles one custom resource into PVC, sync/index Job, Service, and either Gateway API `HTTPRoute` or Kubernetes `Ingress`; it creates or rolls the runtime Deployment only after indexing has succeeded. Resource builder functions are tested without a cluster first; controller reconciliation is then tested with controller-runtime's fake/envtest clients.
 
 **Tech Stack:** Go 1.23, controller-runtime, controller-tools, Kubernetes API machinery, Gateway API, standard Go tests, existing CodeGraph runtime image and CLI command.
 
@@ -1299,6 +1299,8 @@ git commit -m "feat: build codegraph repository routes"
 - Create: `deploy/operator/internal/controller/codegraphrepository_controller.go`
 - Create: `deploy/operator/internal/controller/codegraphrepository_controller_test.go`
 
+Important sequencing constraint: this task must not start the runtime Deployment before the sync/index Job has succeeded. The first reconcile creates PVC, sync/index Job, Service, and route only. Task 7 adds the job-success path that creates or rolls the Deployment, so the MCP runtime opens a completed index instead of holding a stale SQLite handle across repository replacement.
+
 - [ ] **Step 1: Write reconcile creation test**
 
 Create `deploy/operator/internal/controller/codegraphrepository_controller_test.go`:
@@ -1315,6 +1317,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -1349,9 +1352,9 @@ func TestReconcileCreatesRepositoryResourcesWithGatewayRoute(t *testing.T) {
 
 	assertExists(t, ctx, c, &corev1.PersistentVolumeClaim{}, "codegraph-api-service")
 	assertExists(t, ctx, c, &batchv1.Job{}, "codegraph-api-service-sync-1")
-	assertExists(t, ctx, c, &appsv1.Deployment{}, "codegraph-api-service")
 	assertExists(t, ctx, c, &corev1.Service{}, "codegraph-api-service")
 	assertExists(t, ctx, c, &gatewayv1.HTTPRoute{}, "codegraph-api-service")
+	assertNotFound(t, ctx, c, &appsv1.Deployment{}, "codegraph-api-service")
 }
 
 func TestReconcileCreatesIngressWhenConfigured(t *testing.T) {
@@ -1405,6 +1408,14 @@ func assertExists(t *testing.T, ctx context.Context, c client.Client, obj client
 	key := types.NamespacedName{Name: name, Namespace: "default"}
 	if err := c.Get(ctx, key, obj); err != nil {
 		t.Fatalf("expected %T %s to exist: %v", obj, name, err)
+	}
+}
+
+func assertNotFound(t *testing.T, ctx context.Context, c client.Client, obj client.Object, name string) {
+	t.Helper()
+	key := types.NamespacedName{Name: name, Namespace: "default"}
+	if err := c.Get(ctx, key, obj); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected %T %s to be absent, got err=%v", obj, name, err)
 	}
 }
 ```
@@ -1473,9 +1484,6 @@ func (r *CodeGraphRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 	if err := r.ensure(ctx, &repo, resources.BuildSyncJob(&repo, r.Config.DefaultImage)); err != nil {
 		return r.markDegraded(ctx, &repo, "SyncJobApplyFailed", err)
-	}
-	if err := r.ensure(ctx, &repo, resources.BuildDeployment(&repo, r.Config.DefaultImage)); err != nil {
-		return r.markDegraded(ctx, &repo, "DeploymentApplyFailed", err)
 	}
 	if err := r.ensure(ctx, &repo, resources.BuildService(&repo)); err != nil {
 		return r.markDegraded(ctx, &repo, "ServiceApplyFailed", err)
@@ -1634,6 +1642,10 @@ func TestReconcileMarksReadyWhenJobAndDeploymentAreReady(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: repo.Name, Namespace: repo.Namespace}}); err != nil {
+		t.Fatalf("second reconcile returned error: %v", err)
+	}
+
 	var deployment appsv1.Deployment
 	if err := c.Get(ctx, types.NamespacedName{Name: "codegraph-api-service", Namespace: "default"}, &deployment); err != nil {
 		t.Fatal(err)
@@ -1644,7 +1656,7 @@ func TestReconcileMarksReadyWhenJobAndDeploymentAreReady(t *testing.T) {
 	}
 
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: repo.Name, Namespace: repo.Namespace}}); err != nil {
-		t.Fatalf("second reconcile returned error: %v", err)
+		t.Fatalf("third reconcile returned error: %v", err)
 	}
 
 	var updated codegraphv1alpha1.CodeGraphRepository
@@ -1728,6 +1740,8 @@ if err := r.Status().Update(ctx, &repo); err != nil {
 	return ctrl.Result{}, err
 }
 ```
+
+Before computing final readiness, add this deployment gate after the sync Job lookup logic: if the sync/index Job has succeeded, ensure `resources.BuildDeployment(&repo, r.Config.DefaultImage)` exists or is updated. If the Deployment was just created or updated, report `Ready=False` with `RuntimeUnavailable` until Kubernetes reports `AvailableReplicas > 0`. Do not create the Deployment while the Job is missing, running, or failed.
 
 Add these methods to the same file:
 
