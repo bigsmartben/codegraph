@@ -75,7 +75,7 @@ Both modes expose the CR's `spec.mcp.host` and `spec.mcp.path`, then rewrite the
 From `deploy/operator`:
 
 ```sh
-go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2 crd:allowDangerousTypes=true paths="./api/..." output:crd:artifacts:config=config/crd
+go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2 crd:allowDangerousTypes=true paths="./api/v1alpha1" output:crd:artifacts:config=config/crd
 go test ./...
 go run ./cmd/manager --route-mode=gateway --gateway-name=codegraph
 ```
@@ -83,7 +83,7 @@ go run ./cmd/manager --route-mode=gateway --gateway-name=codegraph
 On Windows PowerShell, install Go and ensure `go` is on `PATH`, then run the same commands with PowerShell quoting:
 
 ```powershell
-go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2 crd:allowDangerousTypes=true paths="./api/..." output:crd:artifacts:config=config/crd
+go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2 crd:allowDangerousTypes=true paths="./api/v1alpha1" output:crd:artifacts:config=config/crd
 go test ./...
 ```
 
