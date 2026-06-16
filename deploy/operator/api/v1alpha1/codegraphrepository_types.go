@@ -27,6 +27,7 @@ const (
 )
 
 // CodeGraphRepositorySpec defines the desired state of CodeGraphRepository.
+// +kubebuilder:validation:XValidation:rule="self.mcp.path == '/mcp/' + self.repoId",message="spec.mcp.path must equal /mcp/<repoId>"
 type CodeGraphRepositorySpec struct {
 	// RepoID is the stable path and resource identifier.
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
@@ -150,6 +151,14 @@ func (r *CodeGraphRepository) Endpoint() string {
 		path = "/" + path
 	}
 	return "https://" + host + path
+}
+
+func (r *CodeGraphRepository) ExpectedMCPPath() string {
+	return "/mcp/" + r.Spec.RepoID
+}
+
+func (r *CodeGraphRepository) MCPPathMatchesRepoID() bool {
+	return r.Spec.MCP.Path == r.ExpectedMCPPath()
 }
 
 func (r *CodeGraphRepository) RuntimeImage(defaultImage string) string {

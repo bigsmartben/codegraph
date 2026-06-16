@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	codegraphv1alpha1 "github.com/colbymchenry/codegraph/deploy/operator/api/v1alpha1"
+	"github.com/colbymchenry/codegraph/deploy/operator/internal/resources"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -115,6 +117,138 @@ func TestReconcileMarksReadyWhenJobAndDeploymentAreReady(t *testing.T) {
 	}
 
 	assertRepositoryReadyStatus(t, ctx, reconciler.Client, repo, "codegraph-api-service", "codegraph-api-service")
+}
+
+func TestReconcileDeletesStaleRuntimeBeforeCreatingNextGenerationSyncJob(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	repo.Generation = 2
+	staleRuntime := resources.BuildDeployment(repo, "ghcr.io/acme/codegraph:runtime")
+	staleRuntime.Spec.Template.Annotations[resources.RepositoryGenerationAnnotation] = "1"
+	reconciler := newTestReconciler(t, repo, staleRuntime)
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	var deployment appsv1.Deployment
+	err = reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service"}, &deployment)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("deployment get error = %v, want NotFound", err)
+	}
+	var job batchv1.Job
+	err = reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service-sync-2"}, &job)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("sync job get error = %v, want NotFound", err)
+	}
+	assertRepositoryRuntimeShutdownStatus(t, ctx, reconciler.Client, repo)
+}
+
+func TestReconcileAllowsDeploymentRefreshAfterCurrentGenerationJobSucceeded(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	repo.Generation = 2
+	staleRuntime := resources.BuildDeployment(repo, "ghcr.io/acme/codegraph:runtime")
+	staleRuntime.Spec.Template.Annotations[resources.RepositoryGenerationAnnotation] = "1"
+	succeededJob := resources.BuildSyncJob(repo, "ghcr.io/acme/codegraph:runtime")
+	succeededJob.Status.Succeeded = 1
+	reconciler := newTestReconciler(t, repo, staleRuntime, succeededJob)
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	var deployment appsv1.Deployment
+	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service"}, &deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	if got := deployment.Spec.Template.Annotations[resources.RepositoryGenerationAnnotation]; got != "2" {
+		t.Fatalf("deployment repository generation annotation = %q, want 2", got)
+	}
+}
+
+func TestReconcileRecordsResolvedRefAndLastSyncTimeFromSucceededJob(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	reconciler := newTestReconciler(t, repo)
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("first Reconcile() error = %v", err)
+	}
+
+	completion := metav1.NewTime(time.Date(2026, 6, 16, 12, 34, 56, 0, time.UTC))
+	var job batchv1.Job
+	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service-sync-1"}, &job); err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	job.Annotations = map[string]string{resources.ResolvedRefAnnotation: "abc123def456"}
+	if err := reconciler.Update(ctx, &job); err != nil {
+		t.Fatalf("update job metadata: %v", err)
+	}
+	job.Status.Succeeded = 1
+	job.Status.CompletionTime = &completion
+	if err := reconciler.Status().Update(ctx, &job); err != nil {
+		t.Fatalf("update job status: %v", err)
+	}
+
+	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("second Reconcile() error = %v", err)
+	}
+
+	var updated codegraphv1alpha1.CodeGraphRepository
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(repo), &updated); err != nil {
+		t.Fatalf("get updated repo: %v", err)
+	}
+	if updated.Status.ResolvedRef != "abc123def456" {
+		t.Fatalf("resolvedRef = %q", updated.Status.ResolvedRef)
+	}
+	if updated.Status.LastSyncTime == nil || !completion.Equal(updated.Status.LastSyncTime) {
+		t.Fatalf("lastSyncTime = %#v, want %s", updated.Status.LastSyncTime, completion.Time)
+	}
+}
+
+func TestReconcileMarksInvalidMCPPathDegradedWithoutCreatingResources(t *testing.T) {
+	ctx := context.Background()
+	repo := controllerRepository()
+	repo.Spec.MCP.Path = "/mcp/other-service"
+	reconciler := newTestReconciler(t, repo)
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repo)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	for _, object := range []client.Object{
+		&corev1.PersistentVolumeClaim{},
+		&batchv1.Job{},
+		&corev1.Service{},
+		&gatewayv1.HTTPRoute{},
+	} {
+		err := reconciler.Get(ctx, types.NamespacedName{Namespace: repo.Namespace, Name: "codegraph-api-service"}, object)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("%T get error = %v, want NotFound", object, err)
+		}
+	}
+
+	var updated codegraphv1alpha1.CodeGraphRepository
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(repo), &updated); err != nil {
+		t.Fatalf("get updated repo: %v", err)
+	}
+	if updated.Status.Phase != codegraphv1alpha1.PhaseDegraded {
+		t.Fatalf("phase = %q", updated.Status.Phase)
+	}
+	ready := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "InvalidMCPPath" {
+		t.Fatalf("Ready condition = %#v", ready)
+	}
+	indexed := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionIndexed)
+	if indexed == nil || indexed.Status != metav1.ConditionFalse || indexed.Reason != "InvalidMCPPath" {
+		t.Fatalf("Indexed condition = %#v", indexed)
+	}
 }
 
 func TestReconcilePreservesIndexSucceededWhenRuntimeApplyFails(t *testing.T) {
@@ -590,6 +724,26 @@ func assertRepositoryDegradedIndexStatus(t *testing.T, ctx context.Context, c cl
 	}
 	indexed := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionIndexed)
 	if indexed == nil || indexed.Status != metav1.ConditionFalse || indexed.Reason != "IndexFailed" {
+		t.Fatalf("Indexed condition = %#v", indexed)
+	}
+}
+
+func assertRepositoryRuntimeShutdownStatus(t *testing.T, ctx context.Context, c client.Client, repo *codegraphv1alpha1.CodeGraphRepository) {
+	t.Helper()
+
+	var updated codegraphv1alpha1.CodeGraphRepository
+	if err := c.Get(ctx, client.ObjectKeyFromObject(repo), &updated); err != nil {
+		t.Fatalf("get updated repo: %v", err)
+	}
+	if updated.Status.Phase != codegraphv1alpha1.PhasePending {
+		t.Fatalf("phase = %q", updated.Status.Phase)
+	}
+	ready := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "RuntimeShutdown" {
+		t.Fatalf("Ready condition = %#v", ready)
+	}
+	indexed := apiMeta.FindStatusCondition(updated.Status.Conditions, codegraphv1alpha1.ConditionIndexed)
+	if indexed == nil || indexed.Status != metav1.ConditionFalse || indexed.Reason != "RuntimeShutdown" {
 		t.Fatalf("Indexed condition = %#v", indexed)
 	}
 }

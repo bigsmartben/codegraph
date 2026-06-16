@@ -57,9 +57,15 @@ func (r *CodeGraphRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 		return ctrl.Result{}, nil
 	}
+	if !repo.MCPPathMatchesRepoID() {
+		return r.markInvalidMCPPath(ctx, &repo)
+	}
 
 	if err := r.ensurePVC(ctx, &repo, resources.BuildPVC(&repo)); err != nil {
 		return r.markDegraded(ctx, &repo, "PVCApplyFailed", err)
+	}
+	if result, blocked, err := r.shutdownStaleRuntimeBeforeSync(ctx, &repo); blocked || err != nil {
+		return result, err
 	}
 	if err := r.ensureJob(ctx, &repo, resources.BuildSyncJob(&repo, r.DefaultImage)); err != nil {
 		return r.markDegraded(ctx, &repo, "SyncJobApplyFailed", err)
@@ -86,16 +92,16 @@ func (r *CodeGraphRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	if err := r.ensure(ctx, &repo, resources.BuildDeployment(&repo, r.DefaultImage)); err != nil {
-		return r.markDegradedWithIndexed(ctx, &repo, "DeploymentApplyFailed", err, indexedSucceededCondition())
+		return r.markDegradedWithSucceededSync(ctx, &repo, "DeploymentApplyFailed", err, job)
 	}
 	deployment, found, err := r.getDeployment(ctx, &repo)
 	if err != nil {
-		return r.markDegradedWithIndexed(ctx, &repo, "DeploymentReadFailed", err, indexedSucceededCondition())
+		return r.markDegradedWithSucceededSync(ctx, &repo, "DeploymentReadFailed", err, job)
 	}
 	if !found || !deploymentRuntimeReady(deployment) {
-		return r.markRuntimePending(ctx, &repo)
+		return r.markRuntimePending(ctx, &repo, job)
 	}
-	return r.markReady(ctx, &repo)
+	return r.markReady(ctx, &repo, job)
 }
 
 func (r *CodeGraphRepositoryReconciler) getSyncJob(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) (*batchv1.Job, bool, error) {
@@ -143,6 +149,40 @@ func deploymentRuntimeReady(deployment *appsv1.Deployment) bool {
 		deployment.Status.UpdatedReplicas >= desired &&
 		deployment.Status.AvailableReplicas >= desired &&
 		deployment.Status.UnavailableReplicas == 0
+}
+
+func deploymentRepositoryGeneration(deployment *appsv1.Deployment) string {
+	if deployment.Spec.Template.Annotations == nil {
+		return ""
+	}
+	return deployment.Spec.Template.Annotations[resources.RepositoryGenerationAnnotation]
+}
+
+func (r *CodeGraphRepositoryReconciler) shutdownStaleRuntimeBeforeSync(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) (ctrl.Result, bool, error) {
+	job, jobFound, err := r.getSyncJob(ctx, repo)
+	if err != nil {
+		result, markErr := r.markDegraded(ctx, repo, "SyncJobReadFailed", err)
+		return result, true, markErr
+	}
+	if jobFound && job.Status.Succeeded > 0 {
+		return ctrl.Result{}, false, nil
+	}
+
+	deployment, found, err := r.getDeployment(ctx, repo)
+	if err != nil {
+		result, markErr := r.markDegraded(ctx, repo, "DeploymentReadFailed", err)
+		return result, true, markErr
+	}
+	if !found || deploymentRepositoryGeneration(deployment) == fmt.Sprintf("%d", repo.Generation) {
+		return ctrl.Result{}, false, nil
+	}
+
+	if err := r.Delete(ctx, deployment); err != nil && !apierrors.IsNotFound(err) {
+		result, markErr := r.markDegraded(ctx, repo, "DeploymentDeleteFailed", err)
+		return result, true, markErr
+	}
+	result, err := r.markIndexWaiting(ctx, repo, codegraphv1alpha1.PhasePending, "RuntimeShutdown", "waiting for stale runtime deployment to stop before syncing")
+	return result, true, err
 }
 
 func (r *CodeGraphRepositoryReconciler) ensureRoute(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) error {
@@ -312,9 +352,12 @@ func (r *CodeGraphRepositoryReconciler) markIndexFailed(ctx context.Context, rep
 	return ctrl.Result{}, nil
 }
 
-func (r *CodeGraphRepositoryReconciler) markRuntimePending(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) (ctrl.Result, error) {
+func (r *CodeGraphRepositoryReconciler) markRuntimePending(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository, job ...*batchv1.Job) (ctrl.Result, error) {
 	if err := r.patchStatus(ctx, repo, func() {
 		setBaseStatus(repo)
+		if len(job) > 0 && job[0] != nil {
+			setSucceededSyncStatus(repo, job[0])
+		}
 		repo.Status.Phase = codegraphv1alpha1.PhasePending
 		repo.SetCondition(metav1.Condition{
 			Type:    codegraphv1alpha1.ConditionReady,
@@ -334,9 +377,10 @@ func (r *CodeGraphRepositoryReconciler) markRuntimePending(ctx context.Context, 
 	return ctrl.Result{}, nil
 }
 
-func (r *CodeGraphRepositoryReconciler) markReady(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) (ctrl.Result, error) {
+func (r *CodeGraphRepositoryReconciler) markReady(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository, job *batchv1.Job) (ctrl.Result, error) {
 	if err := r.patchStatus(ctx, repo, func() {
 		setBaseStatus(repo)
+		setSucceededSyncStatus(repo, job)
 		repo.Status.Phase = codegraphv1alpha1.PhaseReady
 		repo.SetCondition(metav1.Condition{
 			Type:    codegraphv1alpha1.ConditionReady,
@@ -356,6 +400,24 @@ func (r *CodeGraphRepositoryReconciler) markReady(ctx context.Context, repo *cod
 	return ctrl.Result{}, nil
 }
 
+func (r *CodeGraphRepositoryReconciler) markInvalidMCPPath(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository) (ctrl.Result, error) {
+	message := fmt.Sprintf("spec.mcp.path must equal %q", repo.ExpectedMCPPath())
+	if err := r.patchStatus(ctx, repo, func() {
+		setBaseStatus(repo)
+		repo.Status.Phase = codegraphv1alpha1.PhaseDegraded
+		repo.SetCondition(metav1.Condition{
+			Type:    codegraphv1alpha1.ConditionReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  "InvalidMCPPath",
+			Message: message,
+		})
+		repo.SetCondition(indexedFalseCondition("InvalidMCPPath", message))
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
 func setBaseStatus(repo *codegraphv1alpha1.CodeGraphRepository) {
 	names := resources.NamesFor(repo)
 	repo.Status.ObservedGeneration = repo.Generation
@@ -364,8 +426,39 @@ func setBaseStatus(repo *codegraphv1alpha1.CodeGraphRepository) {
 	repo.Status.RouteName = names.Route
 }
 
+func setSucceededSyncStatus(repo *codegraphv1alpha1.CodeGraphRepository, job *batchv1.Job) {
+	repo.Status.ResolvedRef = repo.Spec.Git.Ref
+	if job == nil {
+		return
+	}
+	if job.Annotations != nil && job.Annotations[resources.ResolvedRefAnnotation] != "" {
+		repo.Status.ResolvedRef = job.Annotations[resources.ResolvedRefAnnotation]
+	}
+	if job.Status.CompletionTime != nil {
+		repo.Status.LastSyncTime = job.Status.CompletionTime.DeepCopy()
+	}
+}
+
 func (r *CodeGraphRepositoryReconciler) markDegraded(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository, reason string, err error) (ctrl.Result, error) {
 	return r.markDegradedWithIndexed(ctx, repo, reason, err, indexedFalseCondition(reason, err.Error()))
+}
+
+func (r *CodeGraphRepositoryReconciler) markDegradedWithSucceededSync(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository, reason string, err error, job *batchv1.Job) (ctrl.Result, error) {
+	if updateErr := r.patchStatus(ctx, repo, func() {
+		setBaseStatus(repo)
+		setSucceededSyncStatus(repo, job)
+		repo.Status.Phase = codegraphv1alpha1.PhaseDegraded
+		repo.SetCondition(metav1.Condition{
+			Type:    codegraphv1alpha1.ConditionReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  reason,
+			Message: err.Error(),
+		})
+		repo.SetCondition(indexedSucceededCondition())
+	}); updateErr != nil {
+		return ctrl.Result{}, updateErr
+	}
+	return ctrl.Result{}, err
 }
 
 func (r *CodeGraphRepositoryReconciler) markDegradedWithIndexed(ctx context.Context, repo *codegraphv1alpha1.CodeGraphRepository, reason string, err error, indexed metav1.Condition) (ctrl.Result, error) {

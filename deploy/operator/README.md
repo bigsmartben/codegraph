@@ -27,6 +27,7 @@ https://codegraph.example.com/mcp/api-service
 ```
 
 The external route rewrites `/mcp/<repoId>` to `/mcp` before forwarding to the pod. Inside the pod, CodeGraph serves the checked-out repository from `/workspace/repo`.
+`spec.mcp.path` must equal `/mcp/<repoId>`; mismatches are rejected by the CRD and marked degraded by the controller.
 
 ## Sample repository
 

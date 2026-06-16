@@ -14,6 +14,7 @@ import (
 func TestEndpointBuildsFromHostAndPath(t *testing.T) {
 	repo := &CodeGraphRepository{
 		Spec: CodeGraphRepositorySpec{
+			RepoID: "api-service",
 			MCP: MCPSpec{
 				Host: "codegraph.example.com",
 				Path: "/mcp/api-service",
@@ -23,6 +24,29 @@ func TestEndpointBuildsFromHostAndPath(t *testing.T) {
 
 	if got := repo.Endpoint(); got != "https://codegraph.example.com/mcp/api-service" {
 		t.Fatalf("Endpoint() = %q", got)
+	}
+}
+
+func TestMCPPathHelpersMatchRepoID(t *testing.T) {
+	repo := &CodeGraphRepository{
+		Spec: CodeGraphRepositorySpec{
+			RepoID: "api-service",
+			MCP: MCPSpec{
+				Path: "/mcp/api-service",
+			},
+		},
+	}
+
+	if got := repo.ExpectedMCPPath(); got != "/mcp/api-service" {
+		t.Fatalf("ExpectedMCPPath() = %q", got)
+	}
+	if !repo.MCPPathMatchesRepoID() {
+		t.Fatalf("MCPPathMatchesRepoID() = false, want true")
+	}
+
+	repo.Spec.MCP.Path = "/mcp/other-service"
+	if repo.MCPPathMatchesRepoID() {
+		t.Fatalf("MCPPathMatchesRepoID() = true, want false")
 	}
 }
 
@@ -121,6 +145,22 @@ func TestGeneratedCRDIncludesStructuralSchemaMarkers(t *testing.T) {
 	if got := host["pattern"]; got != `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$` {
 		t.Fatalf("spec.mcp.host pattern = %v", got)
 	}
+
+	spec := schemaProperty(t, schema, "spec")
+	validations, ok := spec["x-kubernetes-validations"].([]any)
+	if !ok {
+		t.Fatalf("spec x-kubernetes-validations = %T, want list", spec["x-kubernetes-validations"])
+	}
+	for _, validation := range validations {
+		item, ok := validation.(map[string]any)
+		if !ok {
+			t.Fatalf("validation = %T, want map", validation)
+		}
+		if item["rule"] == "self.mcp.path == '/mcp/' + self.repoId" {
+			return
+		}
+	}
+	t.Fatalf("missing MCP path validation in %#v", validations)
 }
 
 func readGeneratedOpenAPISchema(t *testing.T) map[string]any {

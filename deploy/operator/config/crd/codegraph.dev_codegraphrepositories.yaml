@@ -1159,6 +1159,9 @@ spec:
             - repoId
             - storage
             type: object
+            x-kubernetes-validations:
+            - message: spec.mcp.path must equal /mcp/<repoId>
+              rule: self.mcp.path == '/mcp/' + self.repoId
           status:
             description: CodeGraphRepositoryStatus defines the observed state of CodeGraphRepository.
             properties:
