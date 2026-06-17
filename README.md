@@ -59,9 +59,9 @@ npm i -g @colbymchenry/codegraph
 
 <sub>**Upgrade any time** with `codegraph upgrade` — it detects how you installed (bundle, npm, or npx) and updates in place. Add `--check` to see if an update is available, or `codegraph upgrade <version>` to pin one.</sub>
 
-### 2. Wire up your agent(s)
+### 2. Choose how agents connect
 
-In a **new terminal**, run the installer to connect CodeGraph to the agents you use:
+For one developer on one checkout, use the local MCP server. In a **new terminal**, run the installer to connect CodeGraph to the agents you use:
 
 ```bash
 codegraph install
@@ -69,14 +69,16 @@ codegraph install
 
 <sub>Detects and auto-configures Claude Code, Cursor, Codex CLI, opencode, Hermes Agent, Gemini CLI, Antigravity IDE, and Kiro — wiring the CodeGraph MCP server into each. **This is the step that connects CodeGraph to your agent;** installing the CLI in step 1 does not do it on its own. (Shortcut: `npx @colbymchenry/codegraph` downloads and runs this in one go.)</sub>
 
-### 3. Initialize each project
+For a team or platform setup, expose CodeGraph as one HTTP MCP server instead: run repository runtimes in Kubernetes and connect every agent to the shared `/mcp` URL. Each repository keeps its own checkout and index, while the gateway prefixes tools by repo so one agent session can query many repositories in parallel. See [Cloud-Native Multi-Repo Gateway](#cloud-native-multi-repo-gateway).
+
+### 3. Initialize local projects
 
 ```bash
 cd your-project
 codegraph init -i
 ```
 
-<sub>`codegraph init` just creates the local `.codegraph/` index directory; adding `-i` (`--index`) also builds the initial graph in the same step. Without `-i`, run `codegraph index` afterwards to populate it.</sub>
+<sub>For the local MCP path, `codegraph init` creates the local `.codegraph/` index directory; adding `-i` (`--index`) also builds the initial graph in the same step. Without `-i`, run `codegraph index` afterwards to populate it. In the cloud-native gateway path, the operator runs the sync/index Job for each `CodeGraphRepository` instead.</sub>
 
 <div align="center">
 
@@ -92,7 +94,7 @@ Changed your mind? One command removes CodeGraph from every agent it configured:
 codegraph uninstall
 ```
 
-<sub>Reverses the installer — strips CodeGraph's MCP server config, instructions, and permissions from each configured agent. Your project indexes (`.codegraph/`) are left untouched; remove those per-project with `codegraph uninit`. Use `--target` to remove from specific agents, or `--yes` to run non-interactively.</sub>
+<sub>Reverses the installer — strips CodeGraph's MCP server config and permissions from each configured agent. Your project indexes (`.codegraph/`) are left untouched; remove those per-project with `codegraph uninit`. Use `--target` to remove from specific agents, or `--yes` to run non-interactively.</sub>
 
 ---
 
@@ -326,7 +328,7 @@ The installer will:
 - Ask which agent(s) to configure — auto-detects installed ones from: **Claude Code**, **Cursor**, **Codex CLI**, **opencode**, **Hermes Agent**, **Gemini CLI**, **Antigravity IDE**, **Kiro**
 - Prompt to install `codegraph` on your PATH (so agents can launch the MCP server)
 - Ask whether configs apply to all your projects or just this one
-- Write each chosen agent's MCP server config, plus a small marker-fenced CodeGraph section in the agent's instructions file (`CLAUDE.md` / `AGENTS.md` / `GEMINI.md`) — that's how subagents and non-MCP agents learn the `codegraph explore` / `codegraph node` commands, since the MCP server's own guidance only reaches the main agent. Removed cleanly by `codegraph uninstall`.
+- Write each chosen agent's MCP server config. The MCP server itself delivers the agent-facing usage guidance during `initialize`.
 - Set up auto-allow permissions when Claude Code is one of the targets
 - Initialize your current project (local installs only)
 
@@ -364,7 +366,14 @@ That's it — your agent will use CodeGraph tools automatically when a `.codegra
 
 ### Cloud-Native Multi-Repo Gateway
 
-Use the Kubernetes operator when you want one Codex MCP address for many repositories instead of one local `.codegraph/` index per workspace.
+Use the Kubernetes operator when you want one HTTP MCP address for many repositories instead of one local `.codegraph/` index per workspace.
+
+The deployment shape is:
+
+- One `CodeGraphRepository` per Git repo. Each repo gets its own PVC, sync/index Job, runtime Deployment, Service, and `.codegraph` index.
+- Repository runtimes serve their local graph with `codegraph serve --mcp --http`.
+- One `CodeGraphGateway` runs `codegraph serve --mcp --http --gateway-repos ...`, fans out to the repository Services, and exposes a single `/mcp` endpoint.
+- Agents configure one remote MCP server URL. Gateway tools are named `<repoId>__<tool>`, so a single Codex session can inspect several repositories without switching MCP servers.
 
 ```bash
 # Build a local runtime image for Rancher Desktop / local Kubernetes
@@ -379,7 +388,13 @@ cd deploy/operator
 go run ./cmd/manager --route-mode=ingress --runtime-image=codegraph-runtime:local
 ```
 
-Create one `CodeGraphRepository` per repo, then expose them through one `CodeGraphGateway`. The gateway runs `codegraph serve --mcp --http --gateway-repos ...`, aggregates backend tools as `<repoId>__<tool>`, and exposes one MCP endpoint:
+Create one `CodeGraphRepository` per backend repo, then one `CodeGraphGateway` for the shared HTTP entrypoint. For a local five-repo verification gateway, start from:
+
+```bash
+kubectl apply -f deploy/operator/config/samples/codegraphgateway-local-verify.yaml
+```
+
+The gateway exposes one MCP endpoint:
 
 ```text
 http://127.0.0.1/mcp
@@ -393,7 +408,7 @@ url = "http://127.0.0.1/mcp"
 enabled = true
 ```
 
-For a local five-repo verification gateway, see `deploy/operator/config/samples/codegraphgateway-local-verify.yaml`. Full operator details are in `deploy/operator/README.md`.
+Full operator details, production image publishing, Git authentication, and Gateway API/Ingress routing options are in `deploy/operator/README.md`.
 
 <details>
 <summary><strong>Manual Setup (Alternative)</strong></summary>
@@ -446,7 +461,7 @@ CodeGraph's MCP server delivers its usage guidance to your agent **automatically
 - **Trust the results — don't re-verify with grep**, and check the staleness banner after edits.
 - In a workspace with no index, CodeGraph announces itself inactive and serves no tools — indexing stays your decision.
 
-The exact text is `src/mcp/server-instructions.ts` — the single source of truth for the main agent. Because subagents and non-MCP harnesses never see the MCP guidance, the installer also writes a four-line marker-fenced section into the agent's instructions file pointing at the `codegraph explore` / `codegraph node` CLI equivalents.
+The exact text is `src/mcp/server-instructions.ts` — the single source of truth for agent-facing tool guidance.
 
 </details>
 

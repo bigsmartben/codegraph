@@ -18,6 +18,17 @@ For each `CodeGraphGateway`, the operator owns:
 - A Service on port 3000.
 - A route, either Gateway API `HTTPRoute` or Kubernetes `Ingress`, that exposes the shared gateway path.
 
+## Multi-repo gateway path
+
+Use this operator when agents should connect to one HTTP MCP endpoint while CodeGraph indexes and serves many repositories in parallel.
+
+1. Build and publish one CodeGraph runtime image.
+2. Create one `CodeGraphRepository` per Git repository. Each repository gets an isolated checkout/index PVC, sync/index Job, runtime Deployment, and Service.
+3. Create one `CodeGraphGateway` that lists those repository Services.
+4. Point Codex, Cursor, or another MCP client at the gateway URL, usually `https://<host>/mcp`.
+
+The gateway prefixes every backend tool with its `repoId`, for example `api__codegraph_explore` and `web__codegraph_node`. Agents keep one MCP server configured and choose the repository by tool prefix.
+
 ## Runtime image
 
 The sync Job and runtime Deployment use the same CodeGraph runtime image. Build and push that image from the repository root:
@@ -56,6 +67,8 @@ http://<serviceName>.<namespace>.svc.cluster.local:3000/mcp
 ```
 
 Repository CRs still create the in-cluster runtime Services. Use a `CodeGraphGateway` route for external access instead of exposing one address per repository.
+
+Multiple repository runtimes can index, sync, and serve at the same time. The gateway does not merge their SQLite databases; it fans out MCP calls to the selected backend Service based on the prefixed tool name.
 
 For a local Rancher Desktop deployment exposed through `127.0.0.1`, Codex only needs one MCP server entry:
 

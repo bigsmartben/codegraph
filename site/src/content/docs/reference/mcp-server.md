@@ -3,13 +3,31 @@ title: MCP Server
 description: The tools CodeGraph exposes to AI agents over MCP.
 ---
 
-CodeGraph runs as a [Model Context Protocol](https://modelcontextprotocol.io/) server. Start it with:
+CodeGraph runs as a [Model Context Protocol](https://modelcontextprotocol.io/) server.
+
+## Serving modes
+
+For a local agent connected to the current checkout, start the stdio MCP server with:
 
 ```bash
 codegraph serve --mcp
 ```
 
 Agents configured by the installer launch this automatically. When a `.codegraph/` index exists, the agent uses the tools below.
+
+For a single repository exposed over HTTP, run:
+
+```bash
+codegraph serve --mcp --http --host 0.0.0.0 --port 3000 --path /workspace/repo
+```
+
+For a cloud-native multi-repo gateway, run the HTTP MCP server with a gateway repository list:
+
+```bash
+codegraph serve --mcp --http --host 0.0.0.0 --port 3000 --gateway-repos /etc/codegraph-gateway/repos.json
+```
+
+The Kubernetes operator manages that gateway mode for you. Agents connect to one URL, usually `https://<host>/mcp`, and gateway tools are prefixed by repository, such as `api__codegraph_explore`.
 
 ## Tools
 
@@ -28,4 +46,4 @@ Agents configured by the installer launch this automatically. When a `.codegraph
 
 CodeGraph *is* the pre-built search index. For "how does X work?", architecture, trace, or where-is-X questions, an agent should answer in a handful of CodeGraph calls and stop — typically with **zero file reads** — rather than re-deriving the answer with `grep` + `Read`. A direct CodeGraph answer is a handful of calls; a grep/read exploration is dozens.
 
-The installer writes this guidance into each agent's instructions file automatically.
+The MCP server delivers this guidance to agents automatically during the MCP `initialize` response.
