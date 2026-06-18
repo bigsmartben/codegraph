@@ -1224,8 +1224,9 @@ program
   .option('--host <host>', 'Host for HTTP MCP mode (default: 127.0.0.1)')
   .option('--port <port>', 'Port for HTTP MCP mode (default: 3000, use 0 for a random free port)')
   .option('--gateway-repos <json-or-file>', 'Run HTTP MCP mode as a gateway using repository backend JSON or a JSON file path')
+  .option('--gateway-repo-paths <json-or-file>', 'Run HTTP MCP mode as a repoId router using repository path JSON or a JSON file path')
   .option('--no-watch', 'Disable the file watcher (no auto-sync; useful on slow filesystems like WSL2 /mnt drives)')
-  .action(async (options: { path?: string; mcp?: boolean; http?: boolean; host?: string; port?: string; gatewayRepos?: string; watch?: boolean }) => {
+  .action(async (options: { path?: string; mcp?: boolean; http?: boolean; host?: string; port?: string; gatewayRepos?: string; gatewayRepoPaths?: string; watch?: boolean }) => {
     const projectPath = options.path ? resolveProjectPath(options.path) : undefined;
 
     // Commander sets watch=false when --no-watch is passed. Route it through
@@ -1238,8 +1239,13 @@ program
       if (options.mcp) {
         if (options.http) {
           const parsedPort = parseHttpPort(options.port);
+          if (options.gatewayRepos && options.gatewayRepoPaths) {
+            throw new Error('Use either --gateway-repos or --gateway-repo-paths, not both');
+          }
           const server = options.gatewayRepos
             ? await createGatewayHttpServer(options.gatewayRepos, options.host, parsedPort)
+            : options.gatewayRepoPaths
+              ? await createRepositoryRouterHttpServer(options.gatewayRepoPaths, options.host, parsedPort)
             : await createProjectHttpServer(projectPath, options.host, parsedPort);
           const url = await server.start();
           process.stderr.write(`CodeGraph MCP HTTP server listening on ${url}\n`);
@@ -1298,6 +1304,16 @@ async function createGatewayHttpServer(reposInput: string, host: string | undefi
   const raw = fs.existsSync(reposInput) ? fs.readFileSync(reposInput, 'utf8') : reposInput;
   return new MCPGatewayHttpServer({
     repositories: parseGatewayRepositories(raw),
+    host,
+    port,
+  });
+}
+
+async function createRepositoryRouterHttpServer(reposInput: string, host: string | undefined, port: number): Promise<{ start(): Promise<string>; stop(): void }> {
+  const { MCPRepositoryRouterHttpServer, parseRepositoryRoutes } = await import('../mcp/gateway');
+  const raw = fs.existsSync(reposInput) ? fs.readFileSync(reposInput, 'utf8') : reposInput;
+  return new MCPRepositoryRouterHttpServer({
+    repositories: parseRepositoryRoutes(raw),
     host,
     port,
   });

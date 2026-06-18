@@ -664,7 +664,10 @@ export class ToolHandler {
   // subsequent calls don't pay any cost.
   private catchUpGate: Promise<void> | null = null;
 
-  constructor(private cg: CodeGraph | null) {}
+  constructor(
+    private cg: CodeGraph | null,
+    private openProject: (projectRoot: string) => CodeGraph = (projectRoot) => loadCodeGraph().openSync(projectRoot),
+  ) {}
 
   /**
    * Update the default CodeGraph instance (e.g. after lazy initialization)
@@ -865,7 +868,7 @@ export class ToolHandler {
     }
 
     // Open and cache under both paths
-    const cg = loadCodeGraph().openSync(resolvedRoot);
+    const cg = this.openProject(resolvedRoot);
     this.projectCache.set(resolvedRoot, cg);
     if (projectPath !== resolvedRoot) {
       this.projectCache.set(projectPath, cg);

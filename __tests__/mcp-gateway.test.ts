@@ -3,7 +3,9 @@ import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import * as http from 'http';
 import type { AddressInfo } from 'net';
 import * as path from 'path';
-import { MCPGatewayHttpServer } from '../src/mcp/gateway';
+import * as fs from 'fs';
+import { CodeGraph } from '../src';
+import { MCPGatewayHttpServer, MCPRepositoryRouterHttpServer } from '../src/mcp/gateway';
 import { WASM_RUNTIME_FLAGS } from '../src/extraction/wasm-runtime-flags';
 
 const BIN = path.resolve(__dirname, '../dist/bin/codegraph.js');
@@ -267,4 +269,172 @@ describe('MCP gateway HTTP server', () => {
     const json = await res.json() as { result: { tools: Array<{ name: string }> } };
     expect(json.result.tools.map((tool) => tool.name)).toEqual(['hello-1__codegraph_status']);
   }, 10000);
+
+  it('starts the repository router from the serve --mcp --http CLI branch', async () => {
+    const repo = path.join(__dirname, '..', '.tmp-mcp-router-cli');
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.mkdirSync(repo, { recursive: true });
+    fs.writeFileSync(path.join(repo, 'router-cli.ts'), 'export function routerCliMarker() { return 1; }\n');
+    const cg = await CodeGraph.init(repo, { index: true });
+    cg.close();
+    cleanup.push(() => {
+      fs.rmSync(repo, { recursive: true, force: true });
+    });
+
+    const child = spawn(
+      process.execPath,
+      [
+        ...WASM_RUNTIME_FLAGS,
+        BIN,
+        'serve',
+        '--mcp',
+        '--http',
+        '--port',
+        '0',
+        '--gateway-repo-paths',
+        JSON.stringify([{ repoId: 'router-cli', path: repo }]),
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    ) as ChildProcessWithoutNullStreams;
+    cleanup.push(() => stopChild(child));
+    const url = await waitForHttpUrl(child);
+
+    const res = await post(url, {
+      jsonrpc: '2.0',
+      id: 8,
+      method: 'tools/list',
+    });
+
+    expect(res.status).toBe(200);
+    const json = await res.json() as {
+      result: {
+        tools: Array<{
+          name: string;
+          inputSchema: { properties: Record<string, unknown>; required?: string[] };
+        }>;
+      };
+    };
+    expect(json.result.tools.map((tool) => tool.name)).toContain('codegraph_explore');
+    expect(json.result.tools.map((tool) => tool.name)).not.toContain('router-cli__codegraph_explore');
+    expect(json.result.tools[0]?.inputSchema.properties.repoId).toBeDefined();
+    expect(json.result.tools[0]?.inputSchema.required).toContain('repoId');
+  }, 15000);
+});
+
+describe('MCP repository router HTTP server', () => {
+  const cleanup: Array<() => Promise<void> | void> = [];
+
+  afterEach(async () => {
+    while (cleanup.length > 0) {
+      await cleanup.pop()?.();
+    }
+  });
+
+  it('lists one shared tool set with a required repoId argument', async () => {
+    const router = new MCPRepositoryRouterHttpServer({
+      repositories: [
+        { repoId: 'repo-a', path: path.resolve('fixtures/repo-a') },
+        { repoId: 'repo-b', path: path.resolve('fixtures/repo-b') },
+      ],
+    });
+    cleanup.push(() => router.stop());
+    const url = await router.start();
+
+    const res = await post(url, {
+      jsonrpc: '2.0',
+      id: 6,
+      method: 'tools/list',
+    });
+
+    expect(res.status).toBe(200);
+    const json = await res.json() as {
+      result: {
+        tools: Array<{
+          name: string;
+          inputSchema: { properties: Record<string, unknown>; required?: string[] };
+        }>;
+      };
+    };
+    const names = json.result.tools.map((tool) => tool.name);
+    expect(names).toContain('codegraph_explore');
+    expect(names).toContain('codegraph_repos');
+    expect(names).not.toContain('repo-a__codegraph_explore');
+    expect(new Set(names).size).toBe(names.length);
+    for (const tool of json.result.tools) {
+      if (tool.name === 'codegraph_repos') continue;
+      expect(tool.inputSchema.properties.repoId).toBeDefined();
+      expect(tool.inputSchema.required).toContain('repoId');
+      expect(JSON.stringify(tool.inputSchema.properties.repoId)).not.toContain('repo-a');
+    }
+  });
+
+  it('lists configured repositories on demand instead of repeating them in every tool schema', async () => {
+    const router = new MCPRepositoryRouterHttpServer({
+      repositories: [
+        { repoId: 'repo-a', path: path.resolve('fixtures/repo-a') },
+        { repoId: 'repo-b', path: path.resolve('fixtures/repo-b') },
+      ],
+    });
+    cleanup.push(() => router.stop());
+    const url = await router.start();
+
+    const res = await post(url, {
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'tools/call',
+      params: {
+        name: 'codegraph_repos',
+        arguments: {},
+      },
+    });
+
+    expect(res.status).toBe(200);
+    const json = await res.json() as { result: { content: Array<{ text: string }> } };
+    expect(json.result.content[0]?.text).toContain('repo-a');
+    expect(json.result.content[0]?.text).toContain('repo-b');
+  });
+
+  it('routes shared tool calls to the project mapped by repoId', async () => {
+    const repoA = path.join(__dirname, '..', '.tmp-mcp-router-a');
+    const repoB = path.join(__dirname, '..', '.tmp-mcp-router-b');
+    fs.rmSync(repoA, { recursive: true, force: true });
+    fs.rmSync(repoB, { recursive: true, force: true });
+    fs.mkdirSync(repoA, { recursive: true });
+    fs.mkdirSync(repoB, { recursive: true });
+    fs.writeFileSync(path.join(repoA, 'only-a.ts'), 'export function repoAMarker() { return 1; }\n');
+    fs.writeFileSync(path.join(repoB, 'only-b.ts'), 'export function repoBMarker() { return 2; }\n');
+    const a = await CodeGraph.init(repoA, { index: true });
+    a.close();
+    const b = await CodeGraph.init(repoB, { index: true });
+    b.close();
+    cleanup.push(() => {
+      fs.rmSync(repoA, { recursive: true, force: true });
+      fs.rmSync(repoB, { recursive: true, force: true });
+    });
+
+    const router = new MCPRepositoryRouterHttpServer({
+      repositories: [
+        { repoId: 'repo-a', path: repoA },
+        { repoId: 'repo-b', path: repoB },
+      ],
+    });
+    cleanup.push(() => router.stop());
+    const url = await router.start();
+
+    const res = await post(url, {
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'tools/call',
+      params: {
+        name: 'codegraph_search',
+        arguments: { repoId: 'repo-b', query: 'repoBMarker' },
+      },
+    });
+
+    expect(res.status).toBe(200);
+    const json = await res.json() as { result: { content: Array<{ text: string }> } };
+    expect(json.result.content[0]?.text).toContain('repoBMarker');
+    expect(json.result.content[0]?.text).toContain('only-b.ts');
+    expect(json.result.content[0]?.text).not.toContain('repoAMarker');
+  });
 });
